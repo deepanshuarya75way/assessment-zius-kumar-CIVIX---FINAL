@@ -1,520 +1,311 @@
-import { useEffect, useState, useCallback } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import React, { useEffect, useState } from "react";
 import axios from "axios";
+import socket from "../socket";
 import { motion, AnimatePresence } from "framer-motion";
 import API from "../services/api";
-import socket from "../socket";
 import {
-  LayoutDashboard,
-  FileText,
-  BarChart3,
-  Users,
-  AlertCircle,
-  Settings as SettingsIcon,
-  HelpCircle,
+  BarChart as ReBarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  Cell,
+} from "recharts";
+import {
   Plus,
-  TrendingUp,
-  CheckCircle2,
+  BarChart3,
   Clock,
-  ArrowRight,
-  LogOut,
-  Bell,
-  ShieldCheck,
+  User,
+  CheckCircle2,
+  MapPin,
+  Trash2,
+  Lock,
+  AlertCircle,
+  TrendingUp,
+  Filter
 } from "lucide-react";
+import CreatePoll from "./CreatePoll";
 
-import Petitions from "./Petitions";
-import CreatePetition from "./CreatePetition";
-import Polls from "./Polls";
-import Officials from "./Officials";
-import Reports from "./Reports";
-import HelpSupport from "./HelpSupport";
-import Settings from "./Settings";
-import AdminDashboard from "./AdminDashboard";
 
-export default function Dashboard() {
-  const navigate = useNavigate();
-  const [data, setData] = useState({});
-  const [activeMenu, setActiveMenu] = useState("dashboard");
+const Polls = () => {
+  const token = localStorage.getItem("token");
+  const user = JSON.parse(localStorage.getItem("user")) || {};
+  const userId = user._id || user.id;
+
+  const [polls, setPolls] = useState([]);
+  const [type, setType] = useState("active");
+  const [showCreate, setShowCreate] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [showCreatePetition, setShowCreatePetition] = useState(false);
-  const [recentPetitions, setRecentPetitions] = useState([]);
 
-  const fetchDashboard = useCallback(async () => {
-    const token = localStorage.getItem("token");
+  useEffect(() => {
+    fetchPolls();
+    if (!socket.connected) socket.connect();
+    socket.on("pollUpdated", fetchPolls);
+    return () => socket.off("pollUpdated", fetchPolls);
+  }, []);
 
-    if (!token) {
-      navigate("/");
-      return;
-    }
-
+  const fetchPolls = async () => {
+    setIsLoading(true);
     try {
-      const [dashRes, petRes] = await Promise.all([
-        axios.get(`${API}/api/dashboard`, {
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-        axios.get(`${API}/api/petitions`, {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { page: 1, limit: 3 },
-        }),
-      ]);
-
-      const localUser = JSON.parse(localStorage.getItem("user")) || {};
-
-      setData({ ...localUser, ...dashRes.data });
-      setRecentPetitions(petRes.data.petitions || []);
-    } catch (error) {
-      console.error("Dashboard fetch error:", error);
-      localStorage.clear();
-      socket.disconnect();
-      navigate("/");
+      const res = await axios.get(`${API}/api/polls`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setPolls(res.data);
+    } catch (err) {
+      console.log("Fetch Poll Error:", err);
     } finally {
       setIsLoading(false);
     }
-  }, [navigate]);
-
-  useEffect(() => {
-    fetchDashboard();
-
-    const handleLiveUpdate = () => {
-      fetchDashboard();
-    };
-
-    socket.on("pollUpdated", handleLiveUpdate);
-    socket.on("petition:updated", handleLiveUpdate);
-
-    socket.connect();
-
-    return () => {
-      socket.off("pollUpdated", handleLiveUpdate);
-      socket.off("petition:updated", handleLiveUpdate);
-    };
-  }, [fetchDashboard]);
-
-  const handleLogout = () => {
-    socket.disconnect();
-    localStorage.clear();
-    navigate("/");
   };
 
-  const menuItems = [
-    { id: "dashboard", label: "Overview", icon: LayoutDashboard },
-    { id: "petitions", label: "Petitions", icon: FileText },
-    { id: "polls", label: "Polls", icon: BarChart3 },
-    { id: "officials", label: "Officials", icon: Users },
-    { id: "reports", label: "Reports", icon: AlertCircle },
-    { id: "help", label: "Support", icon: HelpCircle },
-    { id: "settings", label: "Settings", icon: SettingsIcon },
-    ...(data.role === "admin"
-      ? [{ id: "admin", label: "Admin Panel", icon: ShieldCheck }]
-      : []),
-  ];
-
-  const renderContent = () => {
-    switch (activeMenu) {
-      case "petitions":
-        return <Petitions />;
-      case "polls":
-        return <Polls />;
-      case "officials":
-        return <Officials />;
-      case "reports":
-        return <Reports />;
-      case "help":
-        return <HelpSupport />;
-      case "settings":
-        return <Settings />;
-      case "admin":
-        return <AdminDashboard />;
-
-      default:
-        return (
-          <div className="space-y-8">
-            <motion.div
-              initial={{ opacity: 0, y: -20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="relative overflow-hidden bg-white rounded-3xl p-8 border border-slate-100 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-6 group"
-            >
-              <div className="relative z-10">
-                <h1 className="text-4xl font-black text-slate-900 tracking-tight">
-                  Welcome back,{" "}
-                  <span className="text-primary-600">{data.name}</span>!
-                </h1>
-
-                <p className="text-slate-500 font-medium mt-2 text-lg">
-                  You have{" "}
-                  <span className="text-secondary-600 font-bold">
-                    {data.totalPetitions || 0}
-                  </span>{" "}
-                  active petitions in your area.
-                </p>
-              </div>
-
-              <motion.button
-                whileHover={{ scale: 1.05, x: 5 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => setShowCreatePetition(true)}
-                className="btn-primary flex items-center gap-3 self-start md:self-auto shadow-2xl shadow-primary-500/40 py-4 px-8 rounded-2xl text-sm font-black uppercase tracking-widest"
-              >
-                <Plus className="w-5 h-5" />
-                Start a Petition
-              </motion.button>
-
-              <div className="absolute -right-10 -top-10 w-40 h-40 bg-primary-50 rounded-full blur-3xl opacity-50 group-hover:scale-110 transition-transform duration-1000"></div>
-              <div className="absolute -left-10 -bottom-10 w-40 h-40 bg-secondary-50 rounded-full blur-3xl opacity-50 group-hover:scale-110 transition-transform duration-1000"></div>
-            </motion.div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              {[
-                {
-                  label: "Total Petitions",
-                  value: data.totalPetitions || 0,
-                  icon: FileText,
-                  color: "from-secondary-600 to-secondary-500",
-                  shadow: "shadow-secondary-500/20",
-                },
-                {
-                  label: "Active Polls",
-                  value: data.totalPolls || 0,
-                  icon: BarChart3,
-                  color: "from-primary-600 to-primary-500",
-                  shadow: "shadow-primary-500/20",
-                },
-                {
-                  label: "Your Signatures",
-                  value: data.mySignatures || 0,
-                  icon: CheckCircle2,
-                  color: "from-emerald-600 to-emerald-500",
-                  shadow: "shadow-emerald-500/20",
-                },
-                {
-                  label: "Official Responses",
-                  value: data.officialResponses || 0,
-                  icon: Clock,
-                  color: "from-blue-600 to-blue-500",
-                  shadow: "shadow-blue-500/20",
-                },
-              ].map((stat, i) => (
-                <motion.div
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  whileHover={{ y: -8, transition: { duration: 0.3 } }}
-                  transition={{
-                    delay: i * 0.1,
-                    type: "spring",
-                    stiffness: 260,
-                    damping: 20,
-                  }}
-                  key={stat.label}
-                  className="card p-6 border-none bg-white relative overflow-hidden group shadow-sm hover:shadow-xl transition-all duration-300"
-                >
-                  <div className="relative z-10">
-                    <div className="flex items-center justify-between mb-6">
-                      <div
-                        className={`p-3 rounded-2xl bg-gradient-to-br ${stat.color} text-white shadow-lg ${stat.shadow} group-hover:scale-110 transition-transform duration-500`}
-                      >
-                        <stat.icon className="w-6 h-6" />
-                      </div>
-
-                      <div className="flex items-center gap-1 text-[10px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg">
-                        <TrendingUp className="w-3 h-3" />
-                        +12%
-                      </div>
-                    </div>
-
-                    <div className="text-4xl font-black text-slate-900 tracking-tight">
-                      {stat.value}
-                    </div>
-
-                    <div className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mt-2">
-                      {stat.label}
-                    </div>
-                  </div>
-
-                  <stat.icon className="absolute -right-4 -bottom-4 w-24 h-24 text-slate-50 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-                </motion.div>
-              ))}
-            </div>
-
-            <div className="grid grid-cols-1 gap-8">
-              <motion.div
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.4 }}
-                className="space-y-6"
-              >
-                <div className="flex items-center justify-between">
-                  <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-                    <Clock className="w-5 h-5 text-secondary-500" />
-                    Recent Petitions
-                  </h2>
-
-                  <button
-                    onClick={() => setActiveMenu("petitions")}
-                    className="text-sm font-bold text-secondary-600 hover:text-secondary-700 flex items-center gap-1 transition-colors"
-                  >
-                    View all <ArrowRight className="w-4 h-4" />
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {recentPetitions.length === 0 ? (
-                    <div className="col-span-full card p-8 text-center text-slate-400">
-                      <FileText className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                      <p className="text-sm font-bold">No petitions yet</p>
-                    </div>
-                  ) : (
-                    recentPetitions.map((p) => {
-                      const progress = Math.min(
-                        ((p.signatures?.length || 0) / (p.goal || 100)) * 100,
-                        100
-                      );
-
-                      return (
-                        <motion.div
-                          key={p._id}
-                          whileHover={{ y: -5 }}
-                          onClick={() => setActiveMenu("petitions")}
-                          className="card p-5 flex flex-col gap-4 hover:border-secondary-200 transition-[border-color,box-shadow,transform] duration-300 cursor-pointer group"
-                        >
-                          <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 bg-secondary-50 rounded-lg flex items-center justify-center text-secondary-500 group-hover:bg-secondary-500 group-hover:text-white transition-all shrink-0 relative">
-                              <FileText className="w-5 h-5" />
-                              <div className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 border-2 border-white rounded-full"></div>
-                            </div>
-
-                            <div className="flex-1 min-w-0">
-                              <h3 className="font-bold text-slate-900 group-hover:text-secondary-700 transition-colors line-clamp-1 text-sm">
-                                {p.title}
-                              </h3>
-
-                              <p className="text-[10px] text-slate-500 font-medium flex items-center gap-1">
-                                <Users className="w-3 h-3" />
-                                {p.createdBy?.name || "Unknown"}
-                              </p>
-                            </div>
-                          </div>
-
-                          <div className="space-y-2">
-                            <div className="flex justify-between text-[10px] font-bold">
-                              <span className="text-slate-500">
-                                {p.signatures?.length || 0} signatures
-                              </span>
-
-                              <span className="text-primary-600">
-                                {Math.round(progress)}%
-                              </span>
-                            </div>
-
-                            <div className="w-full h-1 bg-slate-100 rounded-full overflow-hidden">
-                              <motion.div
-                                initial={{ width: 0 }}
-                                animate={{ width: `${progress}%` }}
-                                className="h-full bg-primary-500 rounded-full"
-                              />
-                            </div>
-                          </div>
-                        </motion.div>
-                      );
-                    })
-                  )}
-                </div>
-              </motion.div>
-
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.5 }}
-                className="w-full"
-              >
-                <div className="bg-gradient-to-r from-secondary-900 to-secondary-800 rounded-3xl p-8 md:p-10 text-white overflow-hidden relative group shadow-2xl border border-secondary-700/50">
-                  <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-8">
-                    <div className="max-w-2xl">
-                      <div className="flex items-center gap-3 mb-4">
-                        <div className="p-2 bg-primary-500/20 rounded-lg">
-                          <HelpCircle className="w-6 h-6 text-primary-400" />
-                        </div>
-
-                        <h3 className="text-2xl font-black tracking-tight">
-                          Need technical assistance?
-                        </h3>
-                      </div>
-
-                      <p className="text-secondary-100 text-lg opacity-90 leading-relaxed font-medium">
-                        Our dedicated support team is here to help you navigate
-                        the platform, report issues, or understand how to make
-                        the most of Civix tools.
-                      </p>
-                    </div>
-
-                    <div className="flex flex-col sm:flex-row gap-4 shrink-0">
-                      <motion.button
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={() => setActiveMenu("help")}
-                        className="bg-primary-500 text-white px-8 py-4 rounded-2xl text-sm font-black uppercase tracking-widest hover:bg-primary-600 transition-all shadow-xl shadow-primary-500/20 border border-primary-400/20"
-                      >
-                        Contact Support
-                      </motion.button>
-
-                      <motion.button
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={() => setActiveMenu("help")}
-                        className="bg-white/10 backdrop-blur-md text-white px-8 py-4 rounded-2xl text-sm font-black uppercase tracking-widest hover:bg-white/20 transition-all border border-white/10"
-                      >
-                        Documentation
-                      </motion.button>
-                    </div>
-                  </div>
-
-                  <HelpCircle className="absolute -right-10 -bottom-10 w-64 h-64 text-white opacity-[0.03] group-hover:scale-110 group-hover:rotate-12 transition-transform duration-700" />
-                  <div className="absolute top-0 left-1/4 w-64 h-64 bg-primary-500/10 rounded-full blur-[100px] -translate-y-1/2"></div>
-                </div>
-              </motion.div>
-            </div>
-          </div>
-        );
+  const vote = async (id, index) => {
+    try {
+      await axios.put(
+        `${API}/api/polls/vote/${id}`,
+        { optionIndex: index },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      fetchPolls();
+    } catch (err) {
+      alert(err.response?.data?.message || "Failed to vote");
     }
   };
 
-  if (isLoading) {
+  const deletePoll = async (id) => {
+    if (!window.confirm("Delete this poll?")) return;
+    try {
+      await axios.delete(`${API}/api/polls/delete/${id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      fetchPolls();
+    } catch (err) {
+      console.log("Delete Error:", err);
+    }
+  };
+
+  const closePoll = async (id) => {
+    if (!window.confirm("Close this poll?")) return;
+    try {
+      await axios.put(`${API}/api/polls/close/${id}`, {}, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      fetchPolls();
+    } catch (err) {
+      console.log("Close Error:", err);
+    }
+  };
+
+  if (showCreate) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <div className="w-12 h-12 border-4 border-primary-200 border-t-primary-600 rounded-full animate-spin"></div>
-      </div>
+      <CreatePoll
+        onBack={() => {
+          setShowCreate(false);
+          fetchPolls();
+        }}
+      />
     );
   }
 
+  const filtered = polls.filter((p) => {
+    if (type === "active") return p.status === "open";
+    if (type === "closed") return p.status === "closed";
+    if (type === "my") return p.createdBy === userId || p.createdBy?._id === userId;
+    if (type === "voted") return p.voters?.includes(userId);
+    return true;
+  });
+
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col lg:flex-row">
-      <aside className="w-full lg:w-72 bg-white border-r border-slate-200 flex flex-col h-screen sticky top-0 z-40">
-        <div className="p-6 border-b border-slate-100">
-          <Link to="/dashboard" className="flex items-center gap-3 group mb-8">
-            <span className="text-2xl font-black text-slate-900 tracking-tighter">
-              Civix
-            </span>
-          </Link>
-
-          <motion.div
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="bg-slate-50 rounded-2xl p-4 border border-slate-100 mb-2"
-          >
-            <div className="flex items-center gap-3">
-              <div className="relative">
-                <div className="w-12 h-12 rounded-xl bg-secondary-600 flex items-center justify-center text-white text-xl font-bold shadow-md overflow-hidden">
-                  {data.profilePhoto ? (
-                    <img
-                      src={`${API}/uploads/${data.profilePhoto}`}
-                      alt=""
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    data.name?.charAt(0).toUpperCase()
-                  )}
-                </div>
-
-                <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-primary-500 border-2 border-white rounded-full"></div>
-              </div>
-
-              <div className="flex-1 min-w-0">
-                <h3 className="text-sm font-bold text-slate-900 truncate">
-                  {data.name}
-                </h3>
-
-                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
-                  {data.role} • {data.location}
-                </p>
-              </div>
-            </div>
-          </motion.div>
+    <div className="space-y-8">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+        <div>
+          <h1 className="text-2xl font-black text-slate-900 flex items-center gap-2">
+            <BarChart3 className="w-6 h-6 text-secondary-500" />
+            Community Polls
+          </h1>
+          <p className="text-slate-500 text-sm font-medium">Voice your opinion on local decisions.</p>
         </div>
-
-        <div className="flex-1 overflow-y-auto p-4 space-y-1">
-          {menuItems.map((item) => {
-            const Icon = item.icon;
-
-            return (
-              <button
-                key={item.id}
-                onClick={() => setActiveMenu(item.id)}
-                className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl text-sm font-bold transition-all ${
-                  item.id === "admin"
-                    ? activeMenu === "admin"
-                      ? "bg-purple-600 text-white shadow-xl shadow-purple-600/20 scale-[1.02]"
-                      : "text-purple-600 hover:bg-purple-50 border border-purple-100"
-                    : activeMenu === item.id
-                      ? "bg-primary-600 text-white shadow-xl shadow-primary-600/20 scale-[1.02]"
-                      : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
-                }`}
-              >
-                <Icon
-                  className={`w-5 h-5 ${
-                    item.id === "admin"
-                      ? activeMenu === "admin"
-                        ? "text-white"
-                        : "text-purple-500"
-                      : activeMenu === item.id
-                        ? "text-white"
-                        : "text-slate-400"
-                  }`}
-                />
-
-                {item.label}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="p-4 border-t border-slate-100">
-          <button
-            onClick={handleLogout}
-            className="w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl text-sm font-bold text-red-500 hover:bg-red-50 transition-all group"
-          >
-            <LogOut className="w-5 h-5 group-hover:-translate-x-1 transition-transform" />
-            Logout Account
-          </button>
-        </div>
-      </aside>
-
-      <div className="flex-1 flex flex-col min-w-0 h-screen overflow-y-auto">
-        <main className="p-6 md:p-10 max-w-7xl w-full mx-auto">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={activeMenu}
-              initial={{ opacity: 0, x: 10 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -10 }}
-              transition={{ duration: 0.2 }}
-            >
-              {renderContent()}
-            </motion.div>
-          </AnimatePresence>
-        </main>
+        <motion.button
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          onClick={() => setShowCreate(true)}
+          className="btn-primary flex items-center gap-2 shadow-lg shadow-primary-500/20 px-6 py-3"
+        >
+          <Plus className="w-4 h-4" />
+          <span className="font-black uppercase tracking-widest text-xs">Create Poll</span>
+        </motion.button>
       </div>
 
-      <AnimatePresence>
-        {showCreatePetition && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowCreatePetition(false)}
-              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
-            ></motion.div>
+      {/* Tabs */}
+      <div className="flex p-1.5 bg-slate-100 rounded-2xl w-fit border border-slate-200 shadow-inner">
+        {["active", "closed", "my", "voted"].map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setType(tab)}
+            className={`px-6 py-2 rounded-xl text-xs font-black transition-all capitalize tracking-widest ${
+              type === tab
+              ? "bg-white text-secondary-600 shadow-md"
+              : "text-slate-500 hover:text-slate-800"
+            }`}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
 
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl overflow-hidden"
-            >
-              <CreatePetition close={() => setShowCreatePetition(false)} />
-            </motion.div>
+      {/* Poll Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {isLoading ? (
+          <div className="col-span-full flex justify-center py-20">
+            <div className="w-10 h-10 border-4 border-primary-200 border-t-primary-600 rounded-full animate-spin"></div>
           </div>
+        ) : filtered.length === 0 ? (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="col-span-full card p-20 text-center"
+          >
+            <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300">
+              <AlertCircle className="w-10 h-10" />
+            </div>
+            <h3 className="text-xl font-bold text-slate-900 mb-1">No polls found</h3>
+            <p className="text-slate-500 font-medium">Be the first to start a conversation in this category!</p>
+          </motion.div>
+        ) : (
+          <AnimatePresence mode="popLayout">
+            {filtered.map((poll, index) => {
+              const hasVoted = poll.voters?.includes(userId);
+              const isCreator = poll.createdBy === userId || poll.createdBy?._id === userId;
+              const totalVotes = poll.options.reduce((sum, opt) => sum + opt.votes, 0);
+
+              return (
+                <motion.div
+                  layout
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  whileHover={{ y: -4, transition: { duration: 0.2 } }}
+                  transition={{ delay: index * 0.05 }}
+                  key={poll._id}
+                  className="card group hover:border-primary-200 transition-all shadow-sm flex flex-col h-full"
+                >
+                  <div className="p-6 md:p-8 flex-1 flex flex-col">
+                    <div className="flex justify-between items-start gap-4 mb-6">
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest shadow-sm ${
+                            poll.status === 'open' ? 'bg-primary-100 text-primary-700' : 'bg-slate-100 text-slate-600'
+                          }`}>
+                            {poll.status}
+                          </span>
+                          <span className="px-3 py-1 rounded-full bg-slate-50 text-slate-500 text-[10px] font-black uppercase tracking-widest flex items-center gap-1.5 border border-slate-100 shadow-sm">
+                            <MapPin className="w-3 h-3" /> {poll.location}
+                          </span>
+                        </div>
+                        <h3 className="text-xl font-black text-slate-900 leading-tight group-hover:text-primary-700 transition-colors">{poll.question}</h3>
+                      </div>
+                      <div className="flex gap-1">
+                        {isCreator && poll.status === 'open' && (
+                          <motion.button
+                            whileHover={{ scale: 1.1 }}
+                            whileTap={{ scale: 0.9 }}
+                            onClick={() => closePoll(poll._id)}
+                            className="p-2 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-xl transition-all"
+                            title="Close Poll"
+                          >
+                            <Lock className="w-4 h-4" />
+                          </motion.button>
+                        )}
+                        {isCreator && (
+                          <motion.button
+                            whileHover={{ scale: 1.1 }}
+                            whileTap={{ scale: 0.9 }}
+                            onClick={() => deletePoll(poll._id)}
+                            className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
+                            title="Delete Poll"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </motion.button>
+                        )}
+                      </div>
+                    </div>
+
+                    <p className="text-sm text-slate-600 mb-8 line-clamp-2 font-medium leading-relaxed opacity-80">{poll.description}</p>
+
+                    <div className="flex-1 space-y-4 mb-8">
+                      {poll.options.map((opt, i) => {
+                        const percentage = totalVotes > 0 ? Math.round((opt.votes / totalVotes) * 100) : 0;
+                        return (
+                          <div key={i} className="relative group/opt">
+                            <motion.button
+                              whileHover={!hasVoted && poll.status === 'open' ? { scale: 1.01, x: 2 } : {}}
+                              whileTap={!hasVoted && poll.status === 'open' ? { scale: 0.99 } : {}}
+                              onClick={() => vote(poll._id, i)}
+                              disabled={hasVoted || poll.status === 'closed'}
+                              className={`w-full text-left p-4 rounded-2xl border-2 transition-all relative z-10 overflow-hidden ${
+                                hasVoted
+                                ? 'bg-slate-50 border-transparent cursor-default'
+                                : 'bg-white border-slate-100 hover:border-primary-200 hover:bg-primary-50'
+                              }`}
+                            >
+                              <div className="flex justify-between items-center relative z-10">
+                                <span className={`text-sm font-black uppercase tracking-tight ${hasVoted ? 'text-slate-800' : 'text-slate-600'}`}>
+                                  {opt.text}
+                                </span>
+                                {hasVoted && (
+                                  <motion.span
+                                    initial={{ opacity: 0, x: 10 }}
+                                    animate={{ opacity: 1, x: 0 }}
+                                    className="text-sm font-black text-primary-600 bg-white px-2 py-0.5 rounded-lg shadow-sm border border-primary-100"
+                                  >
+                                    {percentage}%
+                                  </motion.span>
+                                )}
+                              </div>
+                              {hasVoted && (
+                                <motion.div
+                                  initial={{ width: 0 }}
+                                  animate={{ width: `${percentage}%` }}
+                                  transition={{ duration: 0.8, ease: "easeOut" }}
+                                  className="absolute inset-y-0 left-0 bg-primary-100/60 z-0"
+                                />
+                              )}
+                            </motion.button>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Footer Info */}
+                    <div className="flex items-center justify-between pt-6 border-t border-slate-50 mt-auto">
+                      <div className="flex items-center gap-5">
+                        <div className="flex items-center gap-2 text-[10px] text-slate-500 font-black uppercase tracking-[0.1em]">
+                          <CheckCircle2 className="w-4 h-4 text-primary-500" />
+                          {totalVotes} Total Votes
+                        </div>
+                        <div className="flex items-center gap-2 text-[10px] text-slate-500 font-black uppercase tracking-[0.1em]">
+                          <TrendingUp className="w-4 h-4 text-secondary-500" />
+                          Active Engagement
+                        </div>
+                      </div>
+                      {hasVoted && (
+                        <motion.span
+                          initial={{ scale: 0 }}
+                          animate={{ scale: 1 }}
+                          className="text-[10px] font-black text-primary-700 uppercase tracking-[0.2em] bg-primary-100 px-3 py-1.5 rounded-xl shadow-sm"
+                        >
+                          Voted
+                        </motion.span>
+                      )}
+                    </div>
+                  </div>
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
         )}
-      </AnimatePresence>
+      </div>
     </div>
   );
-}
+};
+
+export default Polls;

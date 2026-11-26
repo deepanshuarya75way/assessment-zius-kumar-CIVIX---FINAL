@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { motion, AnimatePresence } from "framer-motion";
 import BASE_URL from "../services/api";
+import socket from "../socket";
 import {
   Users,
   FileText,
@@ -57,7 +58,25 @@ export default function AdminDashboard() {
   });
 
   useEffect(() => {
-    fetchStats();
+    const refreshStats = () => {
+      fetchStats();
+    };
+
+    socket.on("petition:updated", refreshStats);
+    socket.on("pollUpdated", refreshStats);
+    socket.on("connect", refreshStats);
+
+    if (!socket.connected) {
+      socket.connect();
+    } else {
+      fetchStats();
+    }
+
+    return () => {
+      socket.off("petition:updated", refreshStats);
+      socket.off("pollUpdated", refreshStats);
+      socket.off("connect", refreshStats);
+    };
   }, []);
   useEffect(() => {
     if (tab === "users") fetchUsers();

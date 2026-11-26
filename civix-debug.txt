@@ -1,0 +1,4966 @@
+========== PROJECT STRUCTURE ==========
+backend/scripts/makeAdmin.js
+backend/routes/polls.js
+backend/routes/reports.js
+backend/routes/petitionRoutes.js
+backend/routes/settingsRoutes.js
+backend/routes/notificationRoutes.js
+backend/routes/officialRoutes.js
+backend/routes/adminRoutes.js
+backend/routes/dashboard.js
+backend/routes/authRoutes.js
+backend/.env
+backend/models/Poll.js
+backend/models/User.js
+backend/models/test.js
+backend/models/Notification.js
+backend/models/Petition.js
+backend/package.json
+backend/server.js
+backend/package-lock.json
+backend/utils/sendEmail.js
+backend/controllers/petitionController.js
+backend/controllers/authController.js
+backend/controllers/settingsController.js
+backend/controllers/dashboardController.js
+backend/controllers/reportsController.js
+backend/middleware/adminMiddleware.js
+backend/middleware/authMiddleware.js
+backend/middleware/upload.js
+backend/test-atlas.js
+frontend/src/styles/helpSupport.css
+frontend/src/styles/Polls.css
+frontend/src/styles/petition.css
+frontend/src/styles/settings.css
+frontend/src/styles/dashboard.css
+frontend/src/styles/officials.css
+frontend/src/styles/reports.css
+frontend/src/styles/main.css
+frontend/src/services/api.js
+frontend/src/socket.js
+frontend/src/components/Navbar.jsx.backup
+frontend/src/components/Navbar.jsx
+frontend/src/components/ProtectedRoute.jsx
+frontend/src/App.jsx
+frontend/src/pages/ForgotPassword.jsx
+frontend/src/pages/Dashboard.jsx
+frontend/src/pages/Home.jsx
+frontend/src/pages/Login.jsx
+frontend/src/pages/CreatePoll.jsx
+frontend/src/pages/ResetPassword.jsx
+frontend/src/pages/Reports.jsx
+frontend/src/pages/Polls.jsx
+frontend/src/pages/Petitions.jsx
+frontend/src/pages/Settings.jsx
+frontend/src/pages/HelpSupport.jsx
+frontend/src/pages/Register.jsx
+frontend/src/pages/CreatePetition.jsx
+frontend/src/pages/AdminDashboard.jsx
+frontend/src/pages/Officials.jsx
+frontend/src/config.js
+frontend/src/api.js
+frontend/src/main.jsx
+frontend/src/index.css
+
+========== RELEVANT SOURCE CODE ==========
+
+========================================
+FILE: backend/routes/polls.js
+========================================
+const express = require("express");
+const router = express.Router();
+const Poll = require("../models/Poll");
+const auth = require("../middleware/authMiddleware");
+
+// ================= CREATE POLL =================
+router.post("/", auth, async (req, res) => {
+  try {
+    const { question, description, options, location, closesAt } = req.body;
+
+    const poll = new Poll({
+      question,
+      description,
+      options: options.map((opt) => ({ text: opt })),
+      location,
+      closesAt,
+      createdBy: req.user.id,
+      status: "open",
+      voters: [],
+    });
+
+    await poll.save();
+
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+
+    res.json({ message: "Poll created successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error creating poll" });
+  }
+});
+
+// ================= GET ALL POLLS =================
+router.get("/", auth, async (req, res) => {
+  try {
+    let polls = await Poll.find().sort({ createdAt: -1 });
+
+    const now = new Date();
+
+    // Auto close expired polls
+    polls = await Promise.all(
+      polls.map(async (poll) => {
+        if (poll.closesAt && now > poll.closesAt && poll.status === "open") {
+          poll.status = "closed";
+          await poll.save();
+        }
+        return poll;
+      }),
+    );
+
+    res.json(polls);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error fetching polls" });
+  }
+});
+
+// ================= VOTE =================
+router.put("/vote/:id", auth, async (req, res) => {
+  try {
+    const { optionIndex } = req.body;
+    const poll = await Poll.findById(req.params.id);
+
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+
+    if (poll.status === "closed")
+      return res.status(400).json({ message: "Poll closed" });
+
+    if (poll.voters.includes(req.user.id))
+      return res.status(400).json({ message: "Already voted" });
+
+    if (!poll.options[optionIndex])
+      return res.status(400).json({ message: "Invalid option" });
+
+    poll.options[optionIndex].votes += 1;
+    poll.voters.push(req.user.id);
+
+    await poll.save();
+
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+
+    res.json({ message: "Vote submitted successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Voting failed" });
+  }
+});
+
+// ================= UPDATE POLL =================
+router.put("/update/:id", auth, async (req, res) => {
+  try {
+    const { question, description, location, closesAt, options } = req.body;
+
+    const poll = await Poll.findById(req.params.id);
+
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+
+    if (poll.createdBy.toString() !== req.user.id)
+      return res.status(403).json({ message: "Not authorized" });
+
+    if (poll.status === "closed")
+      return res.status(400).json({ message: "Cannot edit closed poll" });
+
+    // Update basic fields
+    poll.question = question;
+    poll.description = description;
+    poll.location = location;
+    poll.closesAt = closesAt;
+
+    // 🔥 Update options (reset votes)
+    if (options && options.length >= 2) {
+      poll.options = options.map((opt) => ({
+        text: opt,
+        votes: 0,
+      }));
+      poll.voters = []; // reset voters when editing options
+    }
+
+    await poll.save();
+
+    res.json(poll); // return updated poll
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error updating poll" });
+  }
+});
+
+// ================= DELETE POLL =================
+router.delete("/delete/:id", auth, async (req, res) => {
+  try {
+    const poll = await Poll.findById(req.params.id);
+
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+
+    if (poll.createdBy.toString() !== req.user.id)
+      return res.status(403).json({ message: "Not authorized" });
+
+    await poll.deleteOne();
+
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+
+    res.json({ message: "Poll deleted successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error deleting poll" });
+  }
+});
+
+// ================= CLOSE POLL MANUALLY =================
+router.put("/close/:id", auth, async (req, res) => {
+  try {
+    const poll = await Poll.findById(req.params.id);
+
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+
+    if (poll.createdBy.toString() !== req.user.id)
+      return res.status(403).json({ message: "Not authorized" });
+
+    poll.status = "closed";
+    await poll.save();
+
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+
+    res.json({ message: "Poll closed successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error closing poll" });
+  }
+});
+
+module.exports = router;
+
+========================================
+FILE: backend/routes/reports.js
+========================================
+const router = require("express").Router();
+const Petition = require("../models/Petition");
+const Poll = require("../models/Poll");
+const { Parser } = require("json2csv");
+const PDFDocument = require("pdfkit");
+
+/* ================= GET REPORT DATA ================= */
+
+router.get("/", async (req, res) => {
+  try {
+
+    const totalPetitions = await Petition.countDocuments();
+    const active = await Petition.countDocuments({ status: "active" });
+    const under_review = await Petition.countDocuments({ status: "under_review" });
+    const closed = await Petition.countDocuments({ status: "closed" });
+
+    const totalPolls = await Poll.countDocuments();
+    const openPolls = await Poll.countDocuments({ status: "open" });
+    const closedPolls = await Poll.countDocuments({ status: "closed" });
+
+    const signatures = await Petition.aggregate([
+      { $project: { count: { $size: { $ifNull: ["$signatures", []] } } } },
+      { $group: { _id: null, total: { $sum: "$count" } } }
+    ]);
+
+    // Monthly petition trend — last 6 months
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 5);
+    sixMonthsAgo.setDate(1);
+    sixMonthsAgo.setHours(0, 0, 0, 0);
+
+    const monthlyTrend = await Petition.aggregate([
+      { $match: { createdAt: { $gte: sixMonthsAgo } } },
+      { $addFields: { sigCount: { $size: { $ifNull: ["$signatures", []] } } } },
+      {
+        $group: {
+          _id: { year: { $year: "$createdAt" }, month: { $month: "$createdAt" } },
+          count: { $sum: 1 },
+          signatures: { $sum: "$sigCount" }
+        }
+      },
+      { $sort: { "_id.year": 1, "_id.month": 1 } }
+    ]);
+
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    
+    // Fill in missing months for the last 6 months
+    const trendData = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date();
+      d.setMonth(d.getMonth() - i);
+      const year = d.getFullYear();
+      const month = d.getMonth() + 1; // 1-indexed for matching aggregation
+      
+      const found = monthlyTrend.find(m => m._id.year === year && m._id.month === month);
+      trendData.push({
+        month: monthNames[month - 1],
+        petitions: found ? found.count : 0,
+        signatures: found ? found.signatures : 0
+      });
+    }
+
+    // Top category
+    const topCategoryAgg = await Petition.aggregate([
+      { $group: { _id: "$category", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 1 }
+    ]);
+    const topCategory = topCategoryAgg[0]?._id || "N/A";
+
+    // Category breakdown for bar chart
+    const categoryBreakdown = await Petition.aggregate([
+      { $group: { _id: "$category", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 6 }
+    ]);
+
+    res.json({
+      totalPetitions,
+      active,
+      under_review,
+      closed,
+      totalSignatures: signatures[0]?.total || 0,
+      totalPolls,
+      openPolls,
+      closedPolls,
+      trendData,
+      topCategory,
+      categoryBreakdown: categoryBreakdown.map(c => ({ name: c._id || "Other", count: c.count }))
+    });
+
+  } catch (error) {
+    console.error("Reports error:", error.message);
+    res.status(500).json({ message: "Error generating report", detail: error.message });
+  }
+});
+
+
+/* ================= EXPORT CSV ================= */
+
+router.get("/export/csv", async (req, res) => {
+
+  const data = await Petition.find().populate("createdBy", "name email");
+
+  const fields = [
+    "title",
+    "category",
+    "location",
+    "status",
+    "goal"
+  ];
+
+  const parser = new Parser({ fields });
+
+  const csv = parser.parse(data);
+
+  res.header("Content-Type", "text/csv");
+  res.attachment("civic-report.csv");
+  res.send(csv);
+});
+
+
+/* ================= EXPORT PDF ================= */
+
+router.get("/export/pdf", async (req, res) => {
+
+  const totalPetitions = await Petition.countDocuments();
+  const active = await Petition.countDocuments({ status: "active" });
+  const under_review = await Petition.countDocuments({ status: "under_review" });
+  const closed = await Petition.countDocuments({ status: "closed" });
+  const polls = await Poll.countDocuments();
+
+  const doc = new PDFDocument();
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", "attachment; filename=report.pdf");
+
+  doc.pipe(res);
+
+  doc.fontSize(22).text("Civic Engagement Report", { align: "center" });
+  doc.moveDown();
+
+  doc.fontSize(14).text(`Total Petitions: ${totalPetitions}`);
+  doc.text(`Active Petitions: ${active}`);
+  doc.text(`Under Review: ${under_review}`);
+  doc.text(`Closed Petitions: ${closed}`);
+  doc.text(`Total Polls: ${polls}`);
+
+  doc.end();
+});
+
+module.exports = router;
+========================================
+FILE: backend/routes/petitionRoutes.js
+========================================
+const express = require("express");
+const router = express.Router();
+
+const Petition = require("../models/Petition");
+const User = require("../models/User");
+const auth = require("../middleware/authMiddleware");
+const sendEmail = require("../utils/sendEmail");
+const Notification = require("../models/Notification");
+
+// Emit a live update to connected clients
+const emitPetitionUpdate = (req, petition) => {
+  const io = req.app.get("io");
+
+  if (io) {
+    io.emit("petition:updated", {
+      petitionId: petition._id,
+      signatures: petition.signatures?.length || 0,
+      status: petition.status,
+    });
+  }
+};
+
+// Create a notification and send it to the recipient
+const createAndEmitNotification = async (req, userId, message) => {
+  const notification = await Notification.create({
+    userId,
+    message,
+  });
+
+  const io = req.app.get("io");
+
+  if (io) {
+    io.to(`user:${userId.toString()}`).emit("notification:new", notification);
+  }
+
+  return notification;
+};
+
+/* ================= CREATE ================= */
+
+router.post("/", auth, async (req, res) => {
+  try {
+    const { title, description, category, location, goal } = req.body;
+
+    const petition = new Petition({
+      title,
+      description,
+      category,
+      location,
+      goal: goal || 100,
+      createdBy: req.user.id,
+    });
+
+    await petition.save();
+
+    emitPetitionUpdate(req, petition);
+
+    res.status(201).json(petition);
+  } catch (error) {
+    console.error("Create petition error:", error);
+    res.status(500).json({ message: "Error creating petition" });
+  }
+});
+
+/* ================= GET ALL ================= */
+
+router.get("/", auth, async (req, res) => {
+  try {
+    const { page = 1, limit = 5, category, location } = req.query;
+
+    const query = {};
+    const user = await User.findById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (user.role === "official" && user.location) {
+      query.location = { $regex: user.location, $options: "i" };
+    }
+
+    if (category) {
+      query.category = { $regex: category, $options: "i" };
+    }
+
+    if (location) {
+      query.location = { $regex: location, $options: "i" };
+    }
+
+    const total = await Petition.countDocuments(query);
+
+    const petitions = await Petition.find(query)
+      .populate("createdBy", "name email location role")
+      .populate("responses.officialId", "name")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(Number(limit));
+
+    res.json({
+      petitions,
+      totalPages: Math.ceil(total / limit),
+    });
+  } catch (error) {
+    console.error("Fetch petitions error:", error);
+    res.status(500).json({ message: "Error fetching petitions" });
+  }
+});
+
+/* ================= GET ONE ================= */
+
+router.get("/:id", auth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id)
+      .populate("createdBy", "name email location role")
+      .populate("responses.officialId", "name");
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    res.json(petition);
+  } catch (error) {
+    console.error("Fetch petition error:", error);
+    res.status(500).json({ message: "Error fetching petition" });
+  }
+});
+
+/* ================= SIGN ================= */
+
+router.put("/sign/:id", auth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id);
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    if (petition.status !== "active") {
+      return res.status(400).json({
+        message: "Petition must be approved by an admin before it can be signed.",
+      });
+    }
+
+    const alreadySigned = petition.signatures.some(
+      (id) => id.toString() === req.user.id
+    );
+
+    if (alreadySigned) {
+      return res.status(400).json({
+        message: "You have already signed this petition.",
+      });
+    }
+
+    petition.signatures.push(req.user.id);
+
+    if (petition.signatures.length >= petition.goal) {
+      petition.status = "under_review";
+    }
+
+    await petition.save();
+
+    await createAndEmitNotification(
+      req,
+      petition.createdBy,
+      "Someone signed your petition: " + petition.title
+    );
+
+    emitPetitionUpdate(req, petition);
+
+    res.json({
+      message: "Signed successfully",
+      petition,
+    });
+  } catch (error) {
+    console.error("Sign petition error:", error);
+    res.status(500).json({ message: "Error signing petition" });
+  }
+});
+
+/* ================= OFFICIAL RESPONSE ================= */
+
+router.post("/respond/:id", auth, async (req, res) => {
+  try {
+    const { comment } = req.body;
+
+    const user = await User.findById(req.user.id);
+
+    if (!user || user.role !== "official") {
+      return res.status(403).json({
+        message: "Only officials can respond",
+      });
+    }
+
+    const petition = await Petition.findById(req.params.id)
+      .populate("createdBy");
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    petition.responses.push({
+      officialId: req.user.id,
+      comment,
+    });
+
+    await petition.save();
+
+    const creatorId = petition.createdBy._id;
+
+    await createAndEmitNotification(
+      req,
+      creatorId,
+      "Official responded to your petition: " + petition.title
+    );
+
+    emitPetitionUpdate(req, petition);
+
+    const petitionOwner = await User.findById(creatorId);
+
+    if (petitionOwner?.notifications) {
+      await sendEmail(
+        petitionOwner.email,
+        "Official Response to Your Petition",
+        `Hello ${petitionOwner.name},
+
+An official responded to your petition "${petition.title}".
+
+Response:
+${comment}
+
+Thank you.`
+      );
+    }
+
+    res.json({ message: "Response added" });
+  } catch (error) {
+    console.error("Respond to petition error:", error);
+    res.status(500).json({ message: "Error responding" });
+  }
+});
+
+/* ================= CLOSE ================= */
+
+router.put("/close/:id", auth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id);
+    const user = await User.findById(req.user.id);
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    if (!user || (user.role !== "official" && user.role !== "admin")) {
+      return res.status(403).json({
+        message: "Not authorized to close petitions",
+      });
+    }
+
+    petition.status = "closed";
+    await petition.save();
+
+    const creatorId = petition.createdBy?._id || petition.createdBy;
+
+    await createAndEmitNotification(
+      req,
+      creatorId,
+      "Your petition has been closed: " + petition.title
+    );
+
+    emitPetitionUpdate(req, petition);
+
+    const owner = await User.findById(creatorId);
+
+    if (owner?.notifications) {
+      await sendEmail(
+        owner.email,
+        "Petition Closed",
+        `Hello,
+
+Your petition "${petition.title}" has been closed.
+
+Thank you.`
+      );
+    }
+
+    res.json({
+      message: "Petition closed successfully",
+      petition,
+    });
+  } catch (error) {
+    console.error("Close petition error:", error);
+    res.status(500).json({ message: "Error closing petition" });
+  }
+});
+
+/* ================= APPROVE ================= */
+
+router.put("/approve/:id", auth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id);
+    const user = await User.findById(req.user.id);
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    if (!user || (user.role !== "official" && user.role !== "admin")) {
+      return res.status(403).json({ message: "Not authorized" });
+    }
+
+    petition.status = "active";
+    await petition.save();
+
+    const creatorId = petition.createdBy?._id || petition.createdBy;
+
+    await createAndEmitNotification(
+      req,
+      creatorId,
+      "Your petition has been approved: " + petition.title
+    );
+
+    emitPetitionUpdate(req, petition);
+
+    res.json({
+      message: "Petition approved successfully",
+      petition,
+    });
+  } catch (error) {
+    console.error("Approve petition error:", error);
+    res.status(500).json({ message: "Error approving petition" });
+  }
+});
+
+/* ================= UPDATE ================= */
+
+router.put("/:id", auth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id);
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    if (petition.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: "Not authorized" });
+    }
+
+    if (petition.status !== "active") {
+      return res.status(400).json({
+        message: "Only active petitions can be edited",
+      });
+    }
+
+    const { title, description, category, location, goal } = req.body;
+
+    petition.title = title;
+    petition.description = description;
+    petition.category = category;
+    petition.location = location;
+    petition.goal = goal;
+
+    await petition.save();
+
+    emitPetitionUpdate(req, petition);
+
+    res.json({
+      message: "Petition updated successfully",
+      petition,
+    });
+  } catch (error) {
+    console.error("Update petition error:", error);
+    res.status(500).json({ message: "Error updating petition" });
+  }
+});
+
+/* ================= DELETE ================= */
+
+router.delete("/:id", auth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id);
+    const user = await User.findById(req.user.id);
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    const isOfficial = user?.role === "official";
+    const isCreator = petition.createdBy.toString() === req.user.id;
+
+    if (!isOfficial && !isCreator) {
+      return res.status(403).json({ message: "Not authorized" });
+    }
+
+    const petitionId = petition._id;
+
+    await petition.deleteOne();
+
+    const io = req.app.get("io");
+
+    if (io) {
+      io.emit("petition:deleted", { petitionId });
+    }
+
+    res.json({
+      message: isOfficial ? "Deleted by official" : "Deleted by creator",
+    });
+  } catch (error) {
+    console.error("Delete petition error:", error);
+    res.status(500).json({ message: "Error deleting petition" });
+  }
+});
+
+module.exports = router;
+
+========================================
+FILE: backend/routes/settingsRoutes.js
+========================================
+const express = require("express");
+const router = express.Router();
+
+const auth = require("../middleware/authMiddleware");
+const upload = require("../middleware/upload");
+
+const {
+
+  getProfile,
+  updateProfile,
+  changePassword,
+  toggleNotifications,
+  uploadPhoto,
+  removePhoto,
+  deleteAccount
+
+} = require("../controllers/settingsController");
+
+
+router.get("/profile", auth, getProfile);
+
+router.put("/profile", auth, updateProfile);
+
+router.put("/password", auth, changePassword);
+
+router.put("/notifications", auth, toggleNotifications);
+
+router.post("/photo", auth, upload.single("photo"), uploadPhoto);
+
+router.delete("/photo", auth, removePhoto);
+
+router.delete("/delete", auth, deleteAccount);
+
+
+module.exports = router;
+========================================
+FILE: backend/routes/notificationRoutes.js
+========================================
+const express = require("express");
+const router = express.Router();
+const Notification = require("../models/Notification");
+const auth = require("../middleware/authMiddleware");
+
+/* ================= GET NOTIFICATIONS ================= */
+
+router.get("/", auth, async (req, res) => {
+  try {
+
+    const notifications = await Notification
+      .find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .limit(20);
+
+    res.json(notifications);
+
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching notifications" });
+  }
+});
+
+
+/* ================= MARK ALL AS READ ================= */
+
+router.put("/read", auth, async (req, res) => {
+  try {
+
+    await Notification.updateMany(
+      { userId: req.user.id, read: false },
+      { $set: { read: true } }
+    );
+
+    res.json({ message: "Notifications marked as read" });
+
+  } catch (error) {
+    res.status(500).json({ message: "Error updating notifications" });
+  }
+});
+
+
+/* ================= DELETE ALL (OPTIONAL) ================= */
+
+router.delete("/clear", auth, async (req, res) => {
+  try {
+
+    await Notification.deleteMany({ userId: req.user.id });
+
+    res.json({ message: "All notifications cleared" });
+
+  } catch (error) {
+    res.status(500).json({ message: "Error clearing notifications" });
+  }
+});
+
+
+module.exports = router;
+========================================
+FILE: backend/routes/officialRoutes.js
+========================================
+const express = require("express");
+const router = express.Router();
+const User = require("../models/User");
+const auth = require("../middleware/authMiddleware");
+
+router.get("/", auth, async (req, res) => {
+  try {
+    const officials = await User.find({ role: "official" })
+      .select("name email location createdAt");
+
+    res.json(officials);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching officials" });
+  }
+});
+
+module.exports = router;
+========================================
+FILE: backend/routes/adminRoutes.js
+========================================
+const express = require("express");
+const router = express.Router();
+const User = require("../models/User");
+const Petition = require("../models/Petition");
+const Poll = require("../models/Poll");
+const Notification = require("../models/Notification");
+const adminAuth = require("../middleware/adminMiddleware");
+const sendEmail = require("../utils/sendEmail");
+
+/* ─── STATS ─────────────────────────────────────────── */
+router.get("/stats", adminAuth, async (req, res) => {
+  try {
+    const [
+      totalUsers,
+      totalPetitions,
+      totalPolls,
+      pendingPetitions,
+      bannedUsers,
+    ] = await Promise.all([
+      User.countDocuments(),
+      Petition.countDocuments(),
+      Poll.countDocuments(),
+      Petition.countDocuments({ status: "pending" }),
+      User.countDocuments({ isBanned: true }),
+    ]);
+
+    const sigAgg = await Petition.aggregate([
+      { $project: { count: { $size: "$signatures" } } },
+      { $group: { _id: null, total: { $sum: "$count" } } },
+    ]);
+
+    const roleBreakdown = await User.aggregate([
+      { $group: { _id: "$role", count: { $sum: 1 } } },
+    ]);
+
+    res.json({
+      totalUsers,
+      totalPetitions,
+      totalPolls,
+      pendingPetitions,
+      bannedUsers,
+      totalSignatures: sigAgg[0]?.total || 0,
+      roleBreakdown,
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching stats" });
+  }
+});
+
+/* ─── USERS ─────────────────────────────────────────── */
+router.get("/users", adminAuth, async (req, res) => {
+  try {
+    const { search = "", role = "" } = req.query;
+    const query = {};
+    if (search) query.name = { $regex: search, $options: "i" };
+    if (role) query.role = role;
+    const users = await User.find(query)
+      .select("-password")
+      .sort({ createdAt: -1 });
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching users" });
+  }
+});
+
+router.put("/users/:id/role", adminAuth, async (req, res) => {
+  try {
+    const { role } = req.body;
+    if (!["citizen", "official", "admin"].includes(role))
+      return res.status(400).json({ message: "Invalid role" });
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { role },
+      { new: true },
+    ).select("-password");
+
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ message: "Error updating role" });
+  }
+});
+
+router.put("/users/:id/ban", adminAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+    if (user.role === "admin")
+      return res.status(400).json({ message: "Cannot ban admins" });
+
+    user.isBanned = !user.isBanned;
+    await user.save();
+    res.json({
+      message: user.isBanned ? "User banned" : "User unbanned",
+      user,
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Error toggling ban" });
+  }
+});
+
+router.put("/users/:id/verify", adminAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+    if (user.role !== "official")
+      return res
+        .status(400)
+        .json({ message: "Only officials can be verified" });
+
+    user.isVerified = !user.isVerified;
+    await user.save();
+    res.json({
+      message: user.isVerified ? "Official verified" : "Verification removed",
+      user,
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Error toggling verification" });
+  }
+});
+
+router.delete("/users/:id", adminAuth, async (req, res) => {
+  try {
+    if (req.params.id === req.user.id)
+      return res
+        .status(400)
+        .json({ message: "Cannot delete your own account" });
+
+    await User.findByIdAndDelete(req.params.id);
+    res.json({ message: "User deleted" });
+  } catch (err) {
+    res.status(500).json({ message: "Error deleting user" });
+  }
+});
+
+/* ─── PETITIONS ─────────────────────────────────────── */
+router.get("/petitions", adminAuth, async (req, res) => {
+  try {
+    const { status = "" } = req.query;
+    const query = status ? { status } : {};
+    const petitions = await Petition.find(query)
+      .populate("createdBy", "name email location")
+      .sort({ createdAt: -1 });
+    res.json(petitions);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching petitions" });
+  }
+});
+
+// Approve petition (under_review → active or closed)
+router.put("/petitions/:id/approve", adminAuth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id).populate(
+      "createdBy",
+    );
+    if (!petition)
+      return res.status(404).json({ message: "Petition not found" });
+
+    petition.status = "active";
+    await petition.save();
+
+    await Notification.create({
+      userId: petition.createdBy._id,
+      message: `Your petition "${petition.title}" has been approved by admin.`,
+    });
+
+    if (petition.createdBy.notifications) {
+      await sendEmail(
+        petition.createdBy.email,
+        "Petition Approved",
+        `Hello ${petition.createdBy.name},\n\nYour petition "${petition.title}" has been approved.\n\nThank you.`,
+      ).catch(() => {});
+    }
+
+    res.json({ message: "Petition approved", petition });
+  } catch (err) {
+    res.status(500).json({ message: "Error approving petition" });
+  }
+});
+
+// Reject petition → rejected
+router.put("/petitions/:id/reject", adminAuth, async (req, res) => {
+  try {
+    const { reason } = req.body;
+    const petition = await Petition.findById(req.params.id).populate(
+      "createdBy",
+    );
+    if (!petition)
+      return res.status(404).json({ message: "Petition not found" });
+
+    petition.status = "rejected";
+    await petition.save();
+
+    await Notification.create({
+      userId: petition.createdBy._id,
+      message: `Your petition "${petition.title}" was rejected. Reason: ${reason || "N/A"}`,
+    });
+
+    if (petition.createdBy.notifications) {
+      await sendEmail(
+        petition.createdBy.email,
+        "Petition Rejected",
+        `Hello ${petition.createdBy.name},\n\nYour petition "${petition.title}" has been rejected.\nReason: ${reason || "N/A"}\n\nThank you.`,
+      ).catch(() => {});
+    }
+
+    res.json({ message: "Petition rejected", petition });
+  } catch (err) {
+    res.status(500).json({ message: "Error rejecting petition" });
+  }
+});
+
+router.put("/petitions/:id/status", adminAuth, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const validStatuses = [
+      "pending",
+      "active",
+      "under_review",
+      "closed",
+      "rejected",
+    ];
+    if (!validStatuses.includes(status))
+      return res.status(400).json({ message: "Invalid status" });
+
+    const petition = await Petition.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true },
+    ).populate("createdBy", "name email");
+
+    if (!petition)
+      return res.status(404).json({ message: "Petition not found" });
+
+    await Notification.create({
+      userId: petition.createdBy._id,
+      message: `Your petition status changed to: ${status.replace("_", " ")}`,
+    });
+
+    res.json({ message: "Status updated", petition });
+  } catch (err) {
+    res.status(500).json({ message: "Error updating status" });
+  }
+});
+
+router.delete("/petitions/:id", adminAuth, async (req, res) => {
+  try {
+    const petition = await Petition.findByIdAndDelete(req.params.id);
+    if (!petition)
+      return res.status(404).json({ message: "Petition not found" });
+    res.json({ message: "Petition deleted" });
+  } catch (err) {
+    res.status(500).json({ message: "Error deleting petition" });
+  }
+});
+
+router.put("/petitions/:id/edit", adminAuth, async (req, res) => {
+  try {
+    const { title, description, category, location } = req.body;
+    const petition = await Petition.findByIdAndUpdate(
+      req.params.id,
+      { title, description, category, location },
+      { new: true },
+    );
+    if (!petition)
+      return res.status(404).json({ message: "Petition not found" });
+    res.json({ message: "Petition updated", petition });
+  } catch (err) {
+    res.status(500).json({ message: "Error updating petition" });
+  }
+});
+
+/* ─── POLLS ─────────────────────────────────────────── */
+router.get("/polls", adminAuth, async (req, res) => {
+  try {
+    const polls = await Poll.find()
+      .populate("createdBy", "name email")
+      .sort({ createdAt: -1 });
+    res.json(polls);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching polls" });
+  }
+});
+
+router.put("/polls/:id/close", adminAuth, async (req, res) => {
+  try {
+    const poll = await Poll.findByIdAndUpdate(
+      req.params.id,
+      { status: "closed" },
+      { new: true },
+    );
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+    res.json({ message: "Poll closed", poll });
+  } catch (err) {
+    res.status(500).json({ message: "Error closing poll" });
+  }
+});
+
+router.put("/polls/:id/open", adminAuth, async (req, res) => {
+  try {
+    const poll = await Poll.findByIdAndUpdate(
+      req.params.id,
+      { status: "open" },
+      { new: true },
+    );
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+    res.json({ message: "Poll reopened", poll });
+  } catch (err) {
+    res.status(500).json({ message: "Error reopening poll" });
+  }
+});
+
+router.delete("/polls/:id", adminAuth, async (req, res) => {
+  try {
+    const poll = await Poll.findByIdAndDelete(req.params.id);
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+    res.json({ message: "Poll deleted" });
+  } catch (err) {
+    res.status(500).json({ message: "Error deleting poll" });
+  }
+});
+
+module.exports = router;
+
+========================================
+FILE: backend/routes/dashboard.js
+========================================
+const express = require("express");
+const router = express.Router();
+const auth = require("../middleware/authMiddleware");
+const User = require("../models/User");
+const Petition = require("../models/Petition");
+const Poll = require("../models/Poll");
+
+router.get("/", auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // ✅ TOTAL petitions in system
+    const totalPetitions = await Petition.countDocuments();
+
+    // ✅ TOTAL closed petitions in system
+    const successful = await Petition.countDocuments({
+      status: "closed"
+    });
+
+    // ✅ TOTAL polls in system
+    const totalPolls = await Poll.countDocuments();
+
+    res.json({
+      name: user.name,
+      role: user.role,
+      location: user.location,
+      email: user.email,
+      totalPetitions,
+      successful,
+      totalPolls,
+      reports: 0
+    });
+
+  } catch (error) {
+    console.log("Dashboard Error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+module.exports = router;
+========================================
+FILE: backend/routes/authRoutes.js
+========================================
+const express = require("express");
+const router = express.Router();
+
+const {
+  register,
+  login,
+  forgotPassword,
+  resetPassword,
+} = require("../controllers/authController");
+
+router.post("/register", register);
+router.post("/login", login);
+
+
+router.post("/forgot-password", forgotPassword);
+router.post("/reset-password", resetPassword);
+
+module.exports = router;
+========================================
+FILE: backend/models/Notification.js
+========================================
+const mongoose = require("mongoose");
+
+const notificationSchema = new mongoose.Schema({
+
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User"
+  },
+
+  message: String,
+  link: String,
+
+  read: {
+    type: Boolean,
+    default: false
+  }
+
+}, { timestamps: true });
+
+module.exports = mongoose.model("Notification", notificationSchema);
+========================================
+FILE: backend/models/Petition.js
+========================================
+const mongoose = require("mongoose");
+
+const petitionSchema = new mongoose.Schema(
+{
+  title: { type: String, required: true },
+  description: { type: String, required: true },
+  category: { type: String, required: true },
+  location: { type: String, required: true },
+
+  status: {
+    type: String,
+    enum: ["pending", "active", "under_review", "closed", "rejected"],
+    default: "pending",
+  },
+
+  goal: {
+    type: Number,
+    default: 100,
+  },
+
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+  },
+
+  signatures: [
+    {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+  ],
+
+  /* OFFICIAL RESPONSES */
+
+  responses: [
+    {
+      officialId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+      comment: String,
+      date: {
+        type: Date,
+        default: Date.now,
+      },
+    },
+  ],
+},
+{ timestamps: true }
+);
+
+module.exports = mongoose.model("Petition", petitionSchema);
+========================================
+FILE: backend/server.js
+========================================
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const http = require("http");
+const jwt = require("jsonwebtoken");
+const { Server } = require("socket.io");
+require("dotenv").config();
+
+const app = express();
+const server = http.createServer(app);
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://civix-frontend.onrender.com",
+  /\.onrender\.com$/,
+  /\.netlify\.app$/,
+];
+
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+}));
+
+app.use(express.json());
+
+app.get("/", (req, res) => {
+  res.send("CIVIX Backend is Running 🚀");
+});
+
+// MongoDB connection
+mongoose
+  .connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB Connected"))
+  .catch((err) => console.error("MongoDB error:", err));
+
+// Socket.IO with reconnection recovery
+const io = new Server(server, {
+  cors: {
+    origin: allowedOrigins,
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true,
+  },
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000,
+    skipMiddlewares: false,
+  },
+});
+
+// Authenticate socket connections using the existing JWT
+io.use((socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token;
+
+    if (!token) {
+      return next(new Error("Authentication required"));
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (!decoded.id) {
+      return next(new Error("Invalid token payload"));
+    }
+
+    socket.userId = decoded.id;
+    next();
+  } catch (error) {
+    next(new Error("Invalid or expired token"));
+  }
+});
+
+io.on("connection", (socket) => {
+  socket.join(`user:${socket.userId}`);
+
+  console.log("Authenticated socket connected:", socket.userId);
+
+  socket.on("disconnect", (reason) => {
+    console.log("Socket disconnected:", socket.userId, reason);
+  });
+});
+
+app.set("io", io);
+
+// Routes
+app.use("/api/auth", require("./routes/authRoutes"));
+app.use("/api/dashboard", require("./routes/dashboard"));
+app.use("/api/petitions", require("./routes/petitionRoutes"));
+app.use("/api/polls", require("./routes/polls"));
+app.use("/api/reports", require("./routes/reports"));
+app.use("/api/officials", require("./routes/officialRoutes"));
+app.use("/uploads", express.static("uploads"));
+app.use("/api/settings", require("./routes/settingsRoutes"));
+app.use("/api/notifications", require("./routes/notificationRoutes"));
+app.use("/api/admin", require("./routes/adminRoutes"));
+
+const PORT = process.env.PORT || 5000;
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+========================================
+FILE: backend/utils/sendEmail.js
+========================================
+const nodemailer = require("nodemailer");
+
+const sendEmail = async (to, subject, text) => {
+  try {
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to,
+      subject,
+      text,
+    });
+  } catch (err) {
+    console.log("Email send failed:", err.message);
+  }
+};
+
+module.exports = sendEmail;
+========================================
+FILE: backend/controllers/petitionController.js
+========================================
+const Petition = require("../models/Petition");
+
+// CREATE PETITION
+exports.createPetition = async (req, res) => {
+  try {
+    const { title, description, category } = req.body;
+
+    const petition = await Petition.create({
+      title,
+      description,
+      category,
+      createdBy: req.user.id,
+    });
+
+    res.status(201).json(petition);
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// GET ALL PETITIONS
+exports.getPetitions = async (req, res) => {
+  try {
+    const petitions = await Petition.find().populate("createdBy", "name");
+    res.json(petitions);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+========================================
+FILE: backend/controllers/authController.js
+========================================
+
+const User = require("../models/User");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const nodemailer = require("nodemailer");
+
+// REGISTER
+exports.register = async (req, res) => {
+  try {
+    const { name, email, password, role, location, governmentId } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        message: "Name, email and password are required",
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const strongRegex =
+      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/;
+
+    if (!strongRegex.test(password)) {
+      return res.status(400).json({
+        message:
+          "Password must be at least 8 characters and include uppercase, lowercase, number and special character.",
+      });
+    }
+
+    const existingUser = await User.findOne({
+      email: normalizedEmail,
+    });
+
+    if (existingUser) {
+      return res.status(400).json({
+        message: "User already exists",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const user = new User({
+      name: name.trim(),
+      email: normalizedEmail,
+      password: hashedPassword,
+      role: role || "citizen",
+      location,
+      governmentId: governmentId || null,
+    });
+
+    await user.save();
+
+    return res.status(201).json({
+      message: "Registered successfully",
+    });
+  } catch (error) {
+    console.error("Register Error:", error);
+    return res.status(500).json({
+      message: "Server error",
+    });
+  }
+};
+
+// LOGIN
+exports.login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        message: "Email and password are required",
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const user = await User.findOne({
+      email: normalizedEmail,
+    });
+
+    if (!user) {
+      return res.status(401).json({
+        message: "Invalid email or password",
+      });
+    }
+
+    if (user.isBanned) {
+      return res.status(403).json({
+        message:
+          "Your account has been suspended. Please contact support.",
+      });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      return res.status(401).json({
+        message: "Invalid email or password",
+      });
+    }
+
+    if (!process.env.JWT_SECRET) {
+      console.error("JWT_SECRET is missing");
+      return res.status(500).json({
+        message: "Authentication configuration error",
+      });
+    }
+
+    const token = jwt.sign(
+      { id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" }
+    );
+
+    return res.status(200).json({
+      message: "Login successful",
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        location: user.location,
+      },
+    });
+  } catch (error) {
+    console.error("Login Error:", error);
+    return res.status(500).json({
+      message: "Server error",
+    });
+  }
+};
+
+// FORGOT PASSWORD
+exports.forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        message: "Email is required",
+      });
+    }
+
+    const user = await User.findOne({
+      email: email.trim().toLowerCase(),
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    const otp = Math.floor(
+      100000 + Math.random() * 900000
+    ).toString();
+
+    user.resetOTP = otp;
+    user.resetOTPExpire = Date.now() + 10 * 60 * 1000;
+
+    await user.save();
+
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+      console.error("Email configuration is missing");
+      return res.status(500).json({
+        message: "Email service is not configured",
+      });
+    }
+
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    await transporter.sendMail({
+      from: `"Civix Support Team" <${process.env.EMAIL_USER}>`,
+      to: user.email,
+      subject: "Password Reset Request - Civix",
+      html: `
+        <h2>Civix Password Reset</h2>
+        <p>Your password reset OTP is:</p>
+        <h1>${otp}</h1>
+        <p>This OTP expires in 10 minutes.</p>
+      `,
+    });
+
+    return res.status(200).json({
+      message: "OTP sent to registered email",
+    });
+  } catch (error) {
+    console.error("Forgot Password Error:", error);
+    return res.status(500).json({
+      message: "Server error",
+    });
+  }
+};
+
+// RESET PASSWORD
+exports.resetPassword = async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        message: "Email, OTP and new password are required",
+      });
+    }
+
+    const user = await User.findOne({
+      email: email.trim().toLowerCase(),
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    if (
+      user.resetOTP !== otp ||
+      !user.resetOTPExpire ||
+      user.resetOTPExpire.getTime() < Date.now()
+    ) {
+      return res.status(400).json({
+        message: "Invalid or expired OTP",
+      });
+    }
+
+    const strongRegex =
+      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/;
+
+    if (!strongRegex.test(newPassword)) {
+      return res.status(400).json({
+        message:
+          "New password must be strong (8+ characters, uppercase, lowercase, number and special character).",
+      });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    user.resetOTP = undefined;
+    user.resetOTPExpire = undefined;
+
+    await user.save();
+
+    return res.status(200).json({
+      message: "Password reset successful",
+    });
+  } catch (error) {
+    console.error("Reset Password Error:", error);
+    return res.status(500).json({
+      message: "Server error",
+    });
+  }
+};
+
+========================================
+FILE: backend/controllers/settingsController.js
+========================================
+const User = require("../models/User");
+const bcrypt = require("bcryptjs");
+
+/* GET PROFILE */
+
+exports.getProfile = async (req, res) => {
+
+  const user = await User.findById(req.user.id).select("-password");
+
+  res.json(user);
+
+};
+
+
+/* UPDATE PROFILE */
+
+exports.updateProfile = async (req, res) => {
+
+  const { name, email, location } = req.body;
+
+  const user = await User.findByIdAndUpdate(
+
+    req.user.id,
+
+    { name, email, location },
+
+    { new: true }
+
+  ).select("-password");
+
+  res.json(user);
+
+};
+
+
+/* CHANGE PASSWORD */
+
+exports.changePassword = async (req, res) => {
+
+  const { currentPassword, newPassword } = req.body;
+
+  const user = await User.findById(req.user.id);
+
+  const match = await bcrypt.compare(currentPassword, user.password);
+
+  if (!match) {
+    return res.status(400).json({ message: "Incorrect password" });
+  }
+
+  const hashed = await bcrypt.hash(newPassword, 10);
+
+  user.password = hashed;
+
+  await user.save();
+
+  res.json({ message: "Password updated" });
+
+};
+
+
+/* TOGGLE EMAIL NOTIFICATIONS */
+
+exports.toggleNotifications = async (req, res) => {
+
+  const { notifications } = req.body;
+
+  const user = await User.findByIdAndUpdate(
+
+    req.user.id,
+
+    { notifications },
+
+    { new: true }
+
+  );
+
+  res.json(user);
+
+};
+
+
+/* UPLOAD PROFILE PHOTO */
+
+exports.uploadPhoto = async (req, res) => {
+
+  const user = await User.findById(req.user.id);
+
+  user.profilePhoto = req.file.filename;
+
+  await user.save();
+
+  res.json({ photo: user.profilePhoto });
+
+};
+
+
+/* REMOVE PROFILE PHOTO */
+
+exports.removePhoto = async (req, res) => {
+
+  const user = await User.findById(req.user.id);
+
+  user.profilePhoto = "";
+
+  await user.save();
+
+  res.json({ message: "Photo removed" });
+
+};
+
+
+/* DELETE ACCOUNT */
+
+exports.deleteAccount = async (req, res) => {
+
+  await User.findByIdAndDelete(req.user.id);
+
+  res.json({ message: "Account deleted" });
+
+};
+========================================
+FILE: backend/controllers/dashboardController.js
+========================================
+const Petition = require("../models/Petition");
+
+exports.getReports = async(req,res)=>{
+
+try{
+
+const totalPetitions = await Petition.countDocuments();
+
+const active = await Petition.countDocuments({status:"active"});
+const review = await Petition.countDocuments({status:"under_review"});
+const closed = await Petition.countDocuments({status:"closed"});
+
+const totalSignatures = await Petition.aggregate([
+{$project:{count:{$size:"$signatures"}}},
+{$group:{_id:null,total:{$sum:"$count"}}}
+]);
+
+res.json({
+totalPetitions,
+active,
+underReview:review,
+closed,
+signatures:totalSignatures[0]?.total || 0
+});
+
+}catch(error){
+res.status(500).json({message:"Error generating report"});
+}
+
+};
+========================================
+FILE: backend/controllers/reportsController.js
+========================================
+const Petition = require("../models/Petition");
+
+exports.getMonthlyReport = async (req, res) => {
+  try {
+
+    const totalPetitions = await Petition.countDocuments();
+
+    const active = await Petition.countDocuments({ status: "active" });
+
+    const closed = await Petition.countDocuments({ status: "closed" });
+
+    const signatures = await Petition.aggregate([
+      {
+        $project: {
+          count: { $size: "$signatures" },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: "$count" },
+        },
+      },
+    ]);
+
+    res.json({
+      totalPetitions,
+      active,
+      closed,
+      totalSignatures: signatures[0]?.total || 0,
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+========================================
+FILE: backend/middleware/adminMiddleware.js
+========================================
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+
+module.exports = async function (req, res, next) {
+    const token = req.headers.authorization?.split(" ")[1];
+
+    if (!token) return res.status(401).json({ message: "No token provided" });
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await User.findById(decoded.id);
+
+        if (!user || user.role !== "admin") {
+            return res.status(403).json({ message: "Admin access required" });
+        }
+
+        req.user = { id: user._id.toString(), role: user.role };
+        next();
+    } catch {
+        res.status(401).json({ message: "Invalid token" });
+    }
+};
+
+========================================
+FILE: backend/middleware/authMiddleware.js
+========================================
+const jwt = require("jsonwebtoken");
+
+module.exports = function (req, res, next) {
+  const token = req.headers.authorization?.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).json({ message: "No token provided" });
+  }
+
+  try {
+    // Decode token to get user info
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // IMPORTANT: make sure JWT contains id and role
+    req.user = {
+      id: decoded.id,
+      role: decoded.role,
+    };
+
+    next();
+  } catch (error) {
+    res.status(401).json({ message: "Invalid token" });
+  }
+};
+========================================
+FILE: backend/middleware/upload.js
+========================================
+const multer = require("multer");
+
+const storage = multer.diskStorage({
+
+  destination: (req, file, cb) => {
+    cb(null, "uploads/");
+  },
+
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + "-" + file.originalname);
+  }
+
+});
+
+const upload = multer({ storage });
+
+module.exports = upload;
+========================================
+FILE: frontend/src/socket.js
+========================================
+
+import { io } from "socket.io-client";
+import API from "./services/api";
+
+const socket = io(API, {
+  autoConnect: false,
+
+  reconnection: true,
+  reconnectionAttempts: Infinity,
+
+  reconnectionDelay: 500,
+  reconnectionDelayMax: 2000,
+
+  timeout: 10000,
+
+  auth: (callback) => {
+    callback({
+      token: localStorage.getItem("token"),
+    });
+  },
+});
+
+export default socket;
+
+========================================
+FILE: frontend/src/components/Navbar.jsx
+========================================
+import { Link, useNavigate, useLocation } from "react-router-dom";
+import { motion, AnimatePresence } from "framer-motion";
+import { 
+  LayoutDashboard, 
+  FileText, 
+  BarChart3, 
+  Users, 
+  AlertCircle, 
+  Settings, 
+  HelpCircle,
+  LogOut,
+  Bell,
+  Menu,
+  X
+} from "lucide-react";
+import { useState, useEffect } from "react";
+import API from "../api";
+import socket from "../socket";
+import { clsx } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+function cn(...inputs) {
+  return twMerge(clsx(inputs));
+}
+
+export default function Navbar() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [isOpen, setIsOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+
+    const fetchNotifications = async () => {
+      try {
+        const response = await API.get("/notifications");
+        if (active) {
+          setUnreadCount(
+            response.data.filter((notification) => !notification.read).length
+          );
+        }
+      } catch (error) {
+        console.error("Failed to fetch notifications:", error);
+      }
+    };
+
+    const handleNewNotification = (notification) => {
+      if (!active) return;
+      setUnreadCount((count) => count + 1);
+    };
+
+    fetchNotifications();
+
+    socket.on("notification:new", handleNewNotification);
+    socket.on("connect", fetchNotifications);
+
+    if (!socket.connected) socket.connect();
+
+    return () => {
+      active = false;
+      socket.off("notification:new", handleNewNotification);
+      socket.off("connect", fetchNotifications);
+    };
+  }, []);
+
+  const user = JSON.parse(localStorage.getItem("user"));
+
+  const logout = () => {
+    localStorage.clear();
+    navigate("/");
+  };
+
+  const navItems = [
+    { name: "Dashboard", path: "/dashboard", icon: LayoutDashboard },
+    { name: "Petitions", path: "/petitions", icon: FileText },
+    { name: "Polls", path: "/polls", icon: BarChart3 },
+    { name: "Officials", path: "/officials", icon: Users },
+    { name: "Reports", path: "/reports", icon: AlertCircle },
+    { name: "Settings", path: "/settings", icon: Settings },
+    { name: "Help", path: "/help-support", icon: HelpCircle },
+  ];
+
+  if (!user) return null;
+
+  return (
+    <nav className="sticky top-0 z-50 w-full bg-white/80 backdrop-blur-md border-b border-slate-200">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex justify-between h-16">
+          <div className="flex items-center">
+            <Link to="/dashboard" className="flex items-center gap-2 group">
+              <div className="w-10 h-10 bg-primary-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-primary-500/20 group-hover:scale-110 transition-transform">
+                <span className="text-xl font-bold">C</span>
+              </div>
+              <span className="text-xl font-bold text-slate-900 tracking-tight">Civix</span>
+            </Link>
+          </div>
+
+          {/* Desktop Nav */}
+          <div className="hidden md:flex items-center gap-1">
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              const isActive = location.pathname === item.path;
+              return (
+                <Link
+                  key={item.path}
+                  to={item.path}
+                  className={cn(
+                    "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all relative",
+                    isActive 
+                      ? "text-primary-600 bg-primary-50" 
+                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+                  )}
+                >
+                  <Icon className="w-4 h-4" />
+                  {item.name}
+                  {isActive && (
+                    <motion.div
+                      layoutId="activeNav"
+                      className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary-600 mx-4"
+                      transition={{ type: "spring", stiffness: 380, damping: 30 }}
+                    />
+                  )}
+                </Link>
+              );
+            })}
+          </div>
+
+          <div className="hidden md:flex items-center gap-4 border-l border-slate-200 ml-4 pl-4">
+            <button
+              className="relative p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-full transition-colors"
+              title={`${unreadCount} unread notifications`}
+              onClick={() => navigate("/notifications")}
+            >
+              <Bell className="w-5 h-5" />
+              {unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-5 h-5 px-1 bg-red-500 text-white text-xs font-bold rounded-full flex items-center justify-center border-2 border-white">
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </span>
+              )}
+            </button>
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-slate-700 font-bold overflow-hidden border border-slate-300">
+                {user.profilePhoto ? (
+                  <img src={`${API}/uploads/${user.profilePhoto}`} alt="" className="w-full h-full object-cover" />
+                ) : (
+                  user.name?.charAt(0).toUpperCase()
+                )}
+              </div>
+              <button 
+                onClick={logout}
+                className="p-2 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-full transition-colors"
+                title="Logout"
+              >
+                <LogOut className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Mobile menu button */}
+          <div className="md:hidden flex items-center">
+            <button
+              onClick={() => setIsOpen(!isOpen)}
+              className="p-2 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100"
+            >
+              {isOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Mobile menu */}
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="md:hidden bg-white border-b border-slate-200 overflow-hidden"
+          >
+            <div className="px-2 pt-2 pb-3 space-y-1">
+              {navItems.map((item) => {
+                const Icon = item.icon;
+                const isActive = location.pathname === item.path;
+                return (
+                  <Link
+                    key={item.path}
+                    to={item.path}
+                    onClick={() => setIsOpen(false)}
+                    className={cn(
+                      "flex items-center gap-3 px-4 py-3 rounded-lg text-base font-medium transition-colors",
+                      isActive 
+                        ? "text-primary-600 bg-primary-50" 
+                        : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+                    )}
+                  >
+                    <Icon className="w-5 h-5" />
+                    {item.name}
+                  </Link>
+                );
+              })}
+              <button
+                onClick={logout}
+                className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-base font-medium text-red-600 hover:bg-red-50 transition-colors"
+              >
+                <LogOut className="w-5 h-5" />
+                Logout
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </nav>
+  );
+}
+
+========================================
+FILE: frontend/src/components/ProtectedRoute.jsx
+========================================
+import { Navigate } from "react-router-dom";
+
+export default function ProtectedRoute({ children }) {
+  const token = localStorage.getItem("token");
+
+  if (!token) {
+    return <Navigate to="/" />;
+  }
+
+  return children;
+}
+========================================
+FILE: frontend/src/App.jsx
+========================================
+import { Routes, Route } from "react-router-dom";
+import Login from "./pages/Login";
+import Register from "./pages/Register";
+import Dashboard from "./pages/Dashboard";
+import Petitions from "./pages/Petitions";
+import CreatePetition from "./pages/CreatePetition";
+import Polls from "./pages/Polls";
+import CreatePoll from "./pages/CreatePoll";
+import Reports from "./pages/Reports";
+import Navbar from "./components/Navbar";
+import ProtectedRoute from "./components/ProtectedRoute";
+import ForgotPassword from "./pages/ForgotPassword";
+import ResetPassword from "./pages/ResetPassword";
+import HelpSupport from "./pages/HelpSupport";
+import Settings from "./pages/Settings";
+
+
+function App() {
+  return (
+    <>
+      <Navbar />
+      <Routes>
+        <Route path="/" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+
+        {/* NEW ROUTES */}
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
+
+        <Route path="/dashboard" element={
+          <ProtectedRoute><Dashboard /></ProtectedRoute>
+        } />
+
+        <Route path="/petitions" element={
+          <ProtectedRoute><Petitions /></ProtectedRoute>
+        } />
+
+        <Route path="/create-petition" element={
+          <ProtectedRoute><CreatePetition /></ProtectedRoute>
+        } />
+
+        <Route path="/polls" element={
+          <ProtectedRoute><Polls /></ProtectedRoute>
+        } />
+
+      <Route
+  path="/help-support"
+  element={
+    <ProtectedRoute>
+      <HelpSupport />
+    </ProtectedRoute>
+  }
+/>
+
+        <Route path="/reports" element={
+          <ProtectedRoute><Reports /></ProtectedRoute>
+        } />
+
+        <Route
+ path="/settings"
+ element={
+  <ProtectedRoute>
+    <Settings/>
+  </ProtectedRoute>
+ }
+/>
+      </Routes>
+
+    </>
+  );
+}
+
+export default App;
+========================================
+FILE: frontend/src/pages/Dashboard.jsx
+========================================
+import { useEffect, useState, useCallback } from "react";
+import { useNavigate, Link } from "react-router-dom";
+import axios from "axios";
+import { motion, AnimatePresence } from "framer-motion";
+import API from "../services/api";
+import socket from "../socket";
+import {
+  LayoutDashboard,
+  FileText,
+  BarChart3,
+  Users,
+  AlertCircle,
+  Settings as SettingsIcon,
+  HelpCircle,
+  Plus,
+  TrendingUp,
+  CheckCircle2,
+  Clock,
+  ArrowRight,
+  LogOut,
+  Bell,
+  ShieldCheck,
+} from "lucide-react";
+
+import Petitions from "./Petitions";
+import CreatePetition from "./CreatePetition";
+import Polls from "./Polls";
+import Officials from "./Officials";
+import Reports from "./Reports";
+import HelpSupport from "./HelpSupport";
+import Settings from "./Settings";
+import AdminDashboard from "./AdminDashboard";
+
+export default function Dashboard() {
+  const navigate = useNavigate();
+  const [data, setData] = useState({});
+  const [activeMenu, setActiveMenu] = useState("dashboard");
+  const [isLoading, setIsLoading] = useState(true);
+  const [showCreatePetition, setShowCreatePetition] = useState(false);
+  const [recentPetitions, setRecentPetitions] = useState([]);
+
+  const fetchDashboard = useCallback(async () => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      navigate("/");
+      return;
+    }
+
+    try {
+      const [dashRes, petRes] = await Promise.all([
+        axios.get(`${API}/api/dashboard`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        axios.get(`${API}/api/petitions`, {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { page: 1, limit: 3 },
+        }),
+      ]);
+
+      const localUser = JSON.parse(localStorage.getItem("user")) || {};
+
+      setData({ ...localUser, ...dashRes.data });
+      setRecentPetitions(petRes.data.petitions || []);
+    } catch (error) {
+      console.error("Dashboard fetch error:", error);
+      localStorage.clear();
+      socket.disconnect();
+      navigate("/");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [navigate]);
+
+  useEffect(() => {
+    fetchDashboard();
+
+    const handleLiveUpdate = () => {
+      fetchDashboard();
+    };
+
+    socket.on("pollUpdated", handleLiveUpdate);
+    socket.on("petition:updated", handleLiveUpdate);
+
+    socket.connect();
+
+    return () => {
+      socket.off("pollUpdated", handleLiveUpdate);
+      socket.off("petition:updated", handleLiveUpdate);
+    };
+  }, [fetchDashboard]);
+
+  const handleLogout = () => {
+    socket.disconnect();
+    localStorage.clear();
+    navigate("/");
+  };
+
+  const menuItems = [
+    { id: "dashboard", label: "Overview", icon: LayoutDashboard },
+    { id: "petitions", label: "Petitions", icon: FileText },
+    { id: "polls", label: "Polls", icon: BarChart3 },
+    { id: "officials", label: "Officials", icon: Users },
+    { id: "reports", label: "Reports", icon: AlertCircle },
+    { id: "help", label: "Support", icon: HelpCircle },
+    { id: "settings", label: "Settings", icon: SettingsIcon },
+    ...(data.role === "admin"
+      ? [{ id: "admin", label: "Admin Panel", icon: ShieldCheck }]
+      : []),
+  ];
+
+  const renderContent = () => {
+    switch (activeMenu) {
+      case "petitions":
+        return <Petitions />;
+      case "polls":
+        return <Polls />;
+      case "officials":
+        return <Officials />;
+      case "reports":
+        return <Reports />;
+      case "help":
+        return <HelpSupport />;
+      case "settings":
+        return <Settings />;
+      case "admin":
+        return <AdminDashboard />;
+
+      default:
+        return (
+          <div className="space-y-8">
+            <motion.div
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="relative overflow-hidden bg-white rounded-3xl p-8 border border-slate-100 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-6 group"
+            >
+              <div className="relative z-10">
+                <h1 className="text-4xl font-black text-slate-900 tracking-tight">
+                  Welcome back,{" "}
+                  <span className="text-primary-600">{data.name}</span>!
+                </h1>
+
+                <p className="text-slate-500 font-medium mt-2 text-lg">
+                  You have{" "}
+                  <span className="text-secondary-600 font-bold">
+                    {data.totalPetitions || 0}
+                  </span>{" "}
+                  active petitions in your area.
+                </p>
+              </div>
+
+              <motion.button
+                whileHover={{ scale: 1.05, x: 5 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setShowCreatePetition(true)}
+                className="btn-primary flex items-center gap-3 self-start md:self-auto shadow-2xl shadow-primary-500/40 py-4 px-8 rounded-2xl text-sm font-black uppercase tracking-widest"
+              >
+                <Plus className="w-5 h-5" />
+                Start a Petition
+              </motion.button>
+
+              <div className="absolute -right-10 -top-10 w-40 h-40 bg-primary-50 rounded-full blur-3xl opacity-50 group-hover:scale-110 transition-transform duration-1000"></div>
+              <div className="absolute -left-10 -bottom-10 w-40 h-40 bg-secondary-50 rounded-full blur-3xl opacity-50 group-hover:scale-110 transition-transform duration-1000"></div>
+            </motion.div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              {[
+                {
+                  label: "Total Petitions",
+                  value: data.totalPetitions || 0,
+                  icon: FileText,
+                  color: "from-secondary-600 to-secondary-500",
+                  shadow: "shadow-secondary-500/20",
+                },
+                {
+                  label: "Active Polls",
+                  value: data.totalPolls || 0,
+                  icon: BarChart3,
+                  color: "from-primary-600 to-primary-500",
+                  shadow: "shadow-primary-500/20",
+                },
+                {
+                  label: "Your Signatures",
+                  value: data.mySignatures || 0,
+                  icon: CheckCircle2,
+                  color: "from-emerald-600 to-emerald-500",
+                  shadow: "shadow-emerald-500/20",
+                },
+                {
+                  label: "Official Responses",
+                  value: data.officialResponses || 0,
+                  icon: Clock,
+                  color: "from-blue-600 to-blue-500",
+                  shadow: "shadow-blue-500/20",
+                },
+              ].map((stat, i) => (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  whileHover={{ y: -8, transition: { duration: 0.3 } }}
+                  transition={{
+                    delay: i * 0.1,
+                    type: "spring",
+                    stiffness: 260,
+                    damping: 20,
+                  }}
+                  key={stat.label}
+                  className="card p-6 border-none bg-white relative overflow-hidden group shadow-sm hover:shadow-xl transition-all duration-300"
+                >
+                  <div className="relative z-10">
+                    <div className="flex items-center justify-between mb-6">
+                      <div
+                        className={`p-3 rounded-2xl bg-gradient-to-br ${stat.color} text-white shadow-lg ${stat.shadow} group-hover:scale-110 transition-transform duration-500`}
+                      >
+                        <stat.icon className="w-6 h-6" />
+                      </div>
+
+                      <div className="flex items-center gap-1 text-[10px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg">
+                        <TrendingUp className="w-3 h-3" />
+                        +12%
+                      </div>
+                    </div>
+
+                    <div className="text-4xl font-black text-slate-900 tracking-tight">
+                      {stat.value}
+                    </div>
+
+                    <div className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mt-2">
+                      {stat.label}
+                    </div>
+                  </div>
+
+                  <stat.icon className="absolute -right-4 -bottom-4 w-24 h-24 text-slate-50 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
+                </motion.div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-1 gap-8">
+              <motion.div
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: 0.4 }}
+                className="space-y-6"
+              >
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                    <Clock className="w-5 h-5 text-secondary-500" />
+                    Recent Petitions
+                  </h2>
+
+                  <button
+                    onClick={() => setActiveMenu("petitions")}
+                    className="text-sm font-bold text-secondary-600 hover:text-secondary-700 flex items-center gap-1 transition-colors"
+                  >
+                    View all <ArrowRight className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {recentPetitions.length === 0 ? (
+                    <div className="col-span-full card p-8 text-center text-slate-400">
+                      <FileText className="w-8 h-8 mx-auto mb-2 opacity-30" />
+                      <p className="text-sm font-bold">No petitions yet</p>
+                    </div>
+                  ) : (
+                    recentPetitions.map((p) => {
+                      const progress = Math.min(
+                        ((p.signatures?.length || 0) / (p.goal || 100)) * 100,
+                        100
+                      );
+
+                      return (
+                        <motion.div
+                          key={p._id}
+                          whileHover={{ y: -5 }}
+                          onClick={() => setActiveMenu("petitions")}
+                          className="card p-5 flex flex-col gap-4 hover:border-secondary-200 transition-[border-color,box-shadow,transform] duration-300 cursor-pointer group"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 bg-secondary-50 rounded-lg flex items-center justify-center text-secondary-500 group-hover:bg-secondary-500 group-hover:text-white transition-all shrink-0 relative">
+                              <FileText className="w-5 h-5" />
+                              <div className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 border-2 border-white rounded-full"></div>
+                            </div>
+
+                            <div className="flex-1 min-w-0">
+                              <h3 className="font-bold text-slate-900 group-hover:text-secondary-700 transition-colors line-clamp-1 text-sm">
+                                {p.title}
+                              </h3>
+
+                              <p className="text-[10px] text-slate-500 font-medium flex items-center gap-1">
+                                <Users className="w-3 h-3" />
+                                {p.createdBy?.name || "Unknown"}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="space-y-2">
+                            <div className="flex justify-between text-[10px] font-bold">
+                              <span className="text-slate-500">
+                                {p.signatures?.length || 0} signatures
+                              </span>
+
+                              <span className="text-primary-600">
+                                {Math.round(progress)}%
+                              </span>
+                            </div>
+
+                            <div className="w-full h-1 bg-slate-100 rounded-full overflow-hidden">
+                              <motion.div
+                                initial={{ width: 0 }}
+                                animate={{ width: `${progress}%` }}
+                                className="h-full bg-primary-500 rounded-full"
+                              />
+                            </div>
+                          </div>
+                        </motion.div>
+                      );
+                    })
+                  )}
+                </div>
+              </motion.div>
+
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.5 }}
+                className="w-full"
+              >
+                <div className="bg-gradient-to-r from-secondary-900 to-secondary-800 rounded-3xl p-8 md:p-10 text-white overflow-hidden relative group shadow-2xl border border-secondary-700/50">
+                  <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-8">
+                    <div className="max-w-2xl">
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="p-2 bg-primary-500/20 rounded-lg">
+                          <HelpCircle className="w-6 h-6 text-primary-400" />
+                        </div>
+
+                        <h3 className="text-2xl font-black tracking-tight">
+                          Need technical assistance?
+                        </h3>
+                      </div>
+
+                      <p className="text-secondary-100 text-lg opacity-90 leading-relaxed font-medium">
+                        Our dedicated support team is here to help you navigate
+                        the platform, report issues, or understand how to make
+                        the most of Civix tools.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row gap-4 shrink-0">
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        onClick={() => setActiveMenu("help")}
+                        className="bg-primary-500 text-white px-8 py-4 rounded-2xl text-sm font-black uppercase tracking-widest hover:bg-primary-600 transition-all shadow-xl shadow-primary-500/20 border border-primary-400/20"
+                      >
+                        Contact Support
+                      </motion.button>
+
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        onClick={() => setActiveMenu("help")}
+                        className="bg-white/10 backdrop-blur-md text-white px-8 py-4 rounded-2xl text-sm font-black uppercase tracking-widest hover:bg-white/20 transition-all border border-white/10"
+                      >
+                        Documentation
+                      </motion.button>
+                    </div>
+                  </div>
+
+                  <HelpCircle className="absolute -right-10 -bottom-10 w-64 h-64 text-white opacity-[0.03] group-hover:scale-110 group-hover:rotate-12 transition-transform duration-700" />
+                  <div className="absolute top-0 left-1/4 w-64 h-64 bg-primary-500/10 rounded-full blur-[100px] -translate-y-1/2"></div>
+                </div>
+              </motion.div>
+            </div>
+          </div>
+        );
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="w-12 h-12 border-4 border-primary-200 border-t-primary-600 rounded-full animate-spin"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col lg:flex-row">
+      <aside className="w-full lg:w-72 bg-white border-r border-slate-200 flex flex-col h-screen sticky top-0 z-40">
+        <div className="p-6 border-b border-slate-100">
+          <Link to="/dashboard" className="flex items-center gap-3 group mb-8">
+            <span className="text-2xl font-black text-slate-900 tracking-tighter">
+              Civix
+            </span>
+          </Link>
+
+          <motion.div
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="bg-slate-50 rounded-2xl p-4 border border-slate-100 mb-2"
+          >
+            <div className="flex items-center gap-3">
+              <div className="relative">
+                <div className="w-12 h-12 rounded-xl bg-secondary-600 flex items-center justify-center text-white text-xl font-bold shadow-md overflow-hidden">
+                  {data.profilePhoto ? (
+                    <img
+                      src={`${API}/uploads/${data.profilePhoto}`}
+                      alt=""
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    data.name?.charAt(0).toUpperCase()
+                  )}
+                </div>
+
+                <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-primary-500 border-2 border-white rounded-full"></div>
+              </div>
+
+              <div className="flex-1 min-w-0">
+                <h3 className="text-sm font-bold text-slate-900 truncate">
+                  {data.name}
+                </h3>
+
+                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
+                  {data.role} • {data.location}
+                </p>
+              </div>
+            </div>
+          </motion.div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-1">
+          {menuItems.map((item) => {
+            const Icon = item.icon;
+
+            return (
+              <button
+                key={item.id}
+                onClick={() => setActiveMenu(item.id)}
+                className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl text-sm font-bold transition-all ${
+                  item.id === "admin"
+                    ? activeMenu === "admin"
+                      ? "bg-purple-600 text-white shadow-xl shadow-purple-600/20 scale-[1.02]"
+                      : "text-purple-600 hover:bg-purple-50 border border-purple-100"
+                    : activeMenu === item.id
+                      ? "bg-primary-600 text-white shadow-xl shadow-primary-600/20 scale-[1.02]"
+                      : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
+                }`}
+              >
+                <Icon
+                  className={`w-5 h-5 ${
+                    item.id === "admin"
+                      ? activeMenu === "admin"
+                        ? "text-white"
+                        : "text-purple-500"
+                      : activeMenu === item.id
+                        ? "text-white"
+                        : "text-slate-400"
+                  }`}
+                />
+
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="p-4 border-t border-slate-100">
+          <button
+            onClick={handleLogout}
+            className="w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl text-sm font-bold text-red-500 hover:bg-red-50 transition-all group"
+          >
+            <LogOut className="w-5 h-5 group-hover:-translate-x-1 transition-transform" />
+            Logout Account
+          </button>
+        </div>
+      </aside>
+
+      <div className="flex-1 flex flex-col min-w-0 h-screen overflow-y-auto">
+        <main className="p-6 md:p-10 max-w-7xl w-full mx-auto">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeMenu}
+              initial={{ opacity: 0, x: 10 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -10 }}
+              transition={{ duration: 0.2 }}
+            >
+              {renderContent()}
+            </motion.div>
+          </AnimatePresence>
+        </main>
+      </div>
+
+      <AnimatePresence>
+        {showCreatePetition && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowCreatePetition(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            ></motion.div>
+
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <CreatePetition close={() => setShowCreatePetition(false)} />
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+========================================
+FILE: frontend/src/pages/Petitions.jsx
+========================================
+import { useEffect, useState } from "react";
+import axios from "axios";
+import { motion, AnimatePresence } from "framer-motion";
+import API from "../services/api";
+import {
+  MapPin,
+  Tag,
+  User,
+  Calendar,
+  CheckCircle2,
+  XCircle,
+  Trash2,
+  MessageSquare,
+  ChevronLeft,
+  ChevronRight,
+  Filter,
+  AlertCircle,
+  Pencil,
+  Plus,
+  ShieldCheck,
+} from "lucide-react";
+import CreatePetition from "./CreatePetition";
+
+export default function Petitions() {
+  const [petitions, setPetitions] = useState([]);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [category, setCategory] = useState("");
+  const [location, setLocation] = useState("");
+  const [responseText, setResponseText] = useState({});
+  const [isLoading, setIsLoading] = useState(true);
+  const [editId, setEditId] = useState(null); // petition being edited
+  const [showCreate, setShowCreate] = useState(false); // create modal
+
+  const token = localStorage.getItem("token");
+  const user = JSON.parse(localStorage.getItem("user")) || {};
+  const userId = user._id || user.id;
+  const isAdmin = user?.role === "admin";
+
+  const fetchPetitions = async () => {
+    setIsLoading(true);
+    try {
+      const res = await axios.get(`${API}/api/petitions`, {
+        params: { page, limit: 5, category, location },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setPetitions(res.data.petitions || []);
+      setTotalPages(res.data.totalPages || 1);
+    } catch (err) {
+      console.error("Error fetching petitions", err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchPetitions();
+  }, [page, category, location]);
+
+  const handleSign = async (id) => {
+    try {
+      const res = await axios.put(
+        `${API}/api/petitions/sign/${id}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      alert(res.data.message);
+      fetchPetitions();
+    } catch (err) {
+      alert(err.response?.data?.message || "Failed to sign petition");
+    }
+  };
+
+  const handleClose = async (id) => {
+    if (!window.confirm("Are you sure you want to close this petition?"))
+      return;
+    try {
+      const res = await axios.put(
+        `${API}/api/petitions/close/${id}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      alert(res.data.message);
+      fetchPetitions();
+    } catch (err) {
+      alert(err.response?.data?.message || "Failed to close petition");
+    }
+  };
+
+  const handleApprove = async (id) => {
+    try {
+      const res = await axios.put(
+        `${API}/api/petitions/approve/${id}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      alert(res.data.message);
+      fetchPetitions();
+    } catch (err) {
+      alert(err.response?.data?.message || "Failed to approve petition");
+    }
+  };
+
+  const handleDelete = async (id) => {
+    if (!window.confirm("Delete this petition? This cannot be undone.")) return;
+    try {
+      await axios.delete(`${API}/api/petitions/${id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      fetchPetitions();
+    } catch (err) {
+      alert(err.response?.data?.message || "Failed to delete petition");
+    }
+  };
+
+  const handleRespond = async (id) => {
+    if (!responseText[id]) {
+      alert("Response cannot be empty");
+      return;
+    }
+    try {
+      await axios.post(
+        `${API}/api/petitions/respond/${id}`,
+        { comment: responseText[id] },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setResponseText((prev) => ({ ...prev, [id]: "" }));
+      fetchPetitions();
+    } catch (err) {
+      alert("Failed to send response");
+    }
+  };
+
+  const handleAdminApprove = async (id) => {
+    try {
+      await axios.put(
+        `${API}/api/admin/petitions/${id}/approve`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      fetchPetitions();
+    } catch (err) {
+      alert(err.response?.data?.message || "Failed to approve");
+    }
+  };
+
+  const handleAdminDisapprove = async (id) => {
+    try {
+      await axios.put(
+        `${API}/api/admin/petitions/${id}/reject`,
+        { reason: "Disapproved by admin" },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      fetchPetitions();
+    } catch (err) {
+      alert(err.response?.data?.message || "Failed to disapprove");
+    }
+  };
+
+  return (
+    <div className="space-y-10">
+      {/* Header & Stats Overview */}
+      <div className="relative overflow-hidden bg-white rounded-3xl p-8 border border-slate-100 shadow-sm group">
+        <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-8">
+          <div className="space-y-2">
+            <h1 className="text-4xl font-black text-slate-900 tracking-tight flex items-center gap-3">
+              <div className="p-3 bg-primary-100 rounded-2xl">
+                <Tag className="w-8 h-8 text-primary-600" />
+              </div>
+              Public Petitions
+            </h1>
+            <p className="text-slate-500 font-medium text-lg max-w-xl">
+              Support local causes, start a movement, and engage directly with
+              community leaders.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-4 shrink-0">
+            {user?.role !== "official" && (
+              <motion.button
+                whileHover={{ scale: 1.05, x: 5 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setShowCreate(true)}
+                className="btn-primary flex items-center gap-3 shadow-2xl shadow-primary-500/40 py-4 px-8 rounded-2xl text-sm font-black uppercase tracking-widest"
+              >
+                <Plus className="w-5 h-5" />
+                Launch Petition
+              </motion.button>
+            )}
+          </div>
+        </div>
+
+        {/* Search & Filter Bar */}
+        <div className="mt-10 flex flex-col md:flex-row items-center gap-4 pt-8 border-t border-slate-50 relative z-10">
+          <div className="relative flex-1 group w-full">
+            <Filter className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400 group-focus-within:text-primary-500 transition-colors" />
+            <input
+              className="input-field pl-12 py-4 bg-slate-50 border-transparent focus:bg-white focus:border-primary-500 shadow-inner w-full text-sm font-bold"
+              placeholder="Search by category (e.g., Environment, Education...)"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+            />
+          </div>
+          <div className="relative flex-1 group w-full">
+            <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400 group-focus-within:text-secondary-500 transition-colors" />
+            <input
+              className="input-field pl-12 py-4 bg-slate-50 border-transparent focus:bg-white focus:border-secondary-500 shadow-inner w-full text-sm font-bold"
+              placeholder="Filter by location..."
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+            />
+          </div>
+          <button
+            onClick={() => {
+              setCategory("");
+              setLocation("");
+              setPage(1);
+            }}
+            className="p-4 bg-slate-100 text-slate-500 hover:text-slate-900 hover:bg-slate-200 rounded-2xl transition-all font-black text-xs uppercase tracking-widest whitespace-nowrap"
+          >
+            Clear Filters
+          </button>
+        </div>
+
+        {/* Abstract Background Shapes */}
+        <div className="absolute -right-10 -top-10 w-40 h-40 bg-primary-50 rounded-full blur-3xl opacity-50 group-hover:scale-150 transition-transform duration-1000"></div>
+        <div className="absolute -left-10 -bottom-10 w-40 h-40 bg-secondary-50 rounded-full blur-3xl opacity-50 group-hover:scale-150 transition-transform duration-1000"></div>
+      </div>
+
+      {/* Petition Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {isLoading ? (
+          <div className="col-span-full flex justify-center py-24">
+            <div className="w-12 h-12 border-4 border-primary-200 border-t-primary-600 rounded-full animate-spin"></div>
+          </div>
+        ) : petitions.length === 0 ? (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="col-span-full card p-24 text-center bg-white border-2 border-dashed border-slate-200"
+          >
+            <div className="w-24 h-24 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-6 text-slate-300">
+              <AlertCircle className="w-12 h-12" />
+            </div>
+            <h3 className="text-2xl font-black text-slate-900 mb-2">
+              No petitions found
+            </h3>
+            <p className="text-slate-500 font-medium text-lg">
+              Try adjusting your filters or be the first to start a cause.
+            </p>
+          </motion.div>
+        ) : (
+          <AnimatePresence mode="popLayout" initial={false}>
+            {petitions.map((p, index) => {
+              const isCreator =
+                p.createdBy?._id === userId || p.createdBy === userId;
+              const isOfficial = user?.role === "official";
+              const alreadySigned = p.signatures?.some(
+                (id) => (id._id || id).toString() === userId?.toString(),
+              );
+              const progress = Math.min(
+                ((p.signatures?.length || 0) / (p.goal || 100)) * 100,
+                100,
+              );
+
+              return (
+                <motion.div
+                  initial={{ opacity: 0, y: 30 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  whileHover={{ y: -8, transition: { duration: 0.3 } }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  transition={{
+                    delay: index * 0.05,
+                    type: "spring",
+                    stiffness: 100,
+                    damping: 20,
+                  }}
+                  key={p._id}
+                  className="card group hover:border-primary-200 transition-[border-color,box-shadow] duration-300 shadow-sm hover:shadow-2xl hover:shadow-primary-500/5 bg-white flex flex-col h-full border-none"
+                >
+                  <div className="p-8 flex-1 flex flex-col">
+                    <div className="flex justify-between items-start gap-6 mb-8">
+                      <div className="space-y-3 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={`px-4 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-[0.15em] shadow-sm ${
+                              p.status === "active"
+                                ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
+                                : p.status === "pending"
+                                  ? "bg-amber-100 text-amber-700 border border-amber-200"
+                                  : "bg-slate-100 text-slate-600 border border-slate-200"
+                            }`}
+                          >
+                            {p.status}
+                          </span>
+                          <span className="px-4 py-1.5 rounded-xl bg-primary-50 text-primary-700 text-[10px] font-black uppercase tracking-[0.15em] flex items-center gap-2 border border-primary-100 shadow-sm">
+                            <Tag className="w-3 h-3" /> {p.category}
+                          </span>
+                        </div>
+                        <h3 className="text-2xl font-black text-slate-900 leading-tight group-hover:text-primary-600 transition-colors line-clamp-2">
+                          {p.title}
+                        </h3>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        {isCreator && (
+                          <>
+                            <motion.button
+                              whileHover={{ scale: 1.1, rotate: -10 }}
+                              whileTap={{ scale: 0.9 }}
+                              onClick={() => setEditId(p._id)}
+                              className="p-3 text-slate-400 hover:text-primary-600 hover:bg-primary-50 rounded-2xl transition-all border border-transparent hover:border-primary-100"
+                              title="Edit Petition"
+                            >
+                              <Pencil className="w-5 h-5" />
+                            </motion.button>
+                          </>
+                        )}
+                        {(isCreator || isOfficial || isAdmin) && (
+                          <motion.button
+                            whileHover={{ scale: 1.1, rotate: 10 }}
+                            whileTap={{ scale: 0.9 }}
+                            onClick={() => handleDelete(p._id)}
+                            className="p-3 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-2xl transition-all border border-transparent hover:border-red-100"
+                            title="Delete Petition"
+                          >
+                            <Trash2 className="w-5 h-5" />
+                          </motion.button>
+                        )}
+                      </div>
+                    </div>
+
+                    <p className="text-slate-500 text-base leading-relaxed line-clamp-3 font-medium opacity-90 mb-8 flex-1">
+                      {p.description}
+                    </p>
+
+                    {/* Progress Area */}
+                    <div className="space-y-5 mb-8 bg-slate-50 p-6 rounded-3xl border border-slate-100 shadow-inner">
+                      <div className="flex justify-between items-end">
+                        <div className="space-y-1">
+                          <div className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">
+                            Current Support
+                          </div>
+                          <div className="text-3xl font-black text-primary-600">
+                            {p.signatures?.length || 0}
+                            <span className="text-sm text-slate-400 font-bold ml-2">
+                              / {p.goal || 100}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-3xl font-black text-slate-900">
+                            {Math.round(progress)}%
+                          </div>
+                        </div>
+                      </div>
+                      <div className="w-full h-4 bg-white rounded-full overflow-hidden shadow-sm border border-slate-200">
+                        <motion.div
+                          initial={{ width: 0 }}
+                          animate={{ width: `${progress}%` }}
+                          transition={{ duration: 1, ease: "easeOut" }}
+                          className="h-full bg-gradient-to-r from-primary-600 to-primary-400 rounded-full shadow-lg shadow-primary-500/30"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Meta Info Grid */}
+                    <div className="grid grid-cols-2 gap-4 mb-8">
+                      <div className="flex items-center gap-3 p-3 bg-white rounded-2xl border border-slate-50 shadow-sm">
+                        <div className="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-slate-400">
+                          <User className="w-5 h-5" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[8px] text-slate-400 uppercase font-black tracking-widest">
+                            Creator
+                          </div>
+                          <div className="text-xs text-slate-900 font-black truncate">
+                            {p.createdBy?.name || "Anonymous"}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3 p-3 bg-white rounded-2xl border border-slate-50 shadow-sm">
+                        <div className="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-slate-400">
+                          <MapPin className="w-5 h-5" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[8px] text-slate-400 uppercase font-black tracking-widest">
+                            Location
+                          </div>
+                          <div className="text-xs text-slate-900 font-black truncate">
+                            {p.location}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Interaction Area */}
+                    <div className="flex flex-col gap-4 mt-auto">
+                      {!isOfficial && !isAdmin && (
+                        <motion.button
+                          whileHover={
+                            p.status === "active" && !alreadySigned
+                              ? { scale: 1.02, y: -2 }
+                              : {}
+                          }
+                          whileTap={
+                            p.status === "active" && !alreadySigned
+                              ? { scale: 0.98 }
+                              : {}
+                          }
+                          onClick={() => handleSign(p._id)}
+                          disabled={alreadySigned || p.status !== "active"}
+                          className={`flex items-center justify-center gap-3 py-5 rounded-2xl text-xs font-black uppercase tracking-[0.2em] transition-all shadow-xl ${
+                            alreadySigned
+                              ? "bg-emerald-50 text-emerald-600 border border-emerald-100 shadow-none opacity-80"
+                              : p.status !== "active"
+                                ? "bg-slate-100 text-slate-400 border border-slate-200 shadow-none cursor-not-allowed"
+                                : "bg-primary-600 text-white shadow-primary-500/30 hover:bg-primary-700"
+                          }`}
+                        >
+                          {alreadySigned ? (
+                            <CheckCircle2 className="w-5 h-5" />
+                          ) : p.status === "pending" ? (
+                            <AlertCircle className="w-5 h-5" />
+                          ) : (
+                            <Plus className="w-5 h-5" />
+                          )}
+                          {alreadySigned
+                            ? "Successfully Signed"
+                            : p.status === "pending"
+                              ? "Awaiting Approval"
+                              : p.status === "active"
+                                ? "Sign this Petition"
+                                : "Closed"}
+                        </motion.button>
+                      )}
+
+                      {isAdmin && (
+                        <div className="grid grid-cols-2 gap-3">
+                          <motion.button
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
+                            onClick={() => handleAdminApprove(p._id)}
+                            disabled={p.status === "active"}
+                            className="flex items-center justify-center gap-2 py-4 bg-emerald-500 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-emerald-600 transition-colors disabled:opacity-40 shadow-lg shadow-emerald-500/20"
+                          >
+                            <CheckCircle2 className="w-4 h-4" /> Approve
+                          </motion.button>
+                          <motion.button
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
+                            onClick={() => handleAdminDisapprove(p._id)}
+                            disabled={p.status === "rejected"}
+                            className="flex items-center justify-center gap-2 py-4 bg-red-500 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-red-600 transition-colors disabled:opacity-40 shadow-lg shadow-red-500/20"
+                          >
+                            <XCircle className="w-4 h-4" /> Reject
+                          </motion.button>
+                        </div>
+                      )}
+
+                      {isOfficial && p.status !== "closed" && (
+                        <div className="space-y-4 pt-4 border-t border-slate-100">
+                          <div className="relative group">
+                            <MessageSquare className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-secondary-500 transition-colors" />
+                            <input
+                              className="input-field pl-12 py-4 bg-slate-50 border-transparent focus:bg-white text-sm font-bold"
+                              placeholder="Add an official response..."
+                              value={responseText[p._id] || ""}
+                              onChange={(e) =>
+                                setResponseText({
+                                  ...responseText,
+                                  [p._id]: e.target.value,
+                                })
+                              }
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <motion.button
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                              onClick={() => handleRespond(p._id)}
+                              className="btn-secondary py-4 text-[10px] font-black uppercase tracking-widest shadow-xl shadow-secondary-600/20"
+                            >
+                              Send Response
+                            </motion.button>
+                            {p.status === "pending" ? (
+                              <motion.button
+                                whileHover={{ scale: 1.05 }}
+                                whileTap={{ scale: 0.95 }}
+                                onClick={() => handleApprove(p._id)}
+                                className="bg-emerald-500 text-white py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-emerald-600 transition-all shadow-lg shadow-emerald-500/20"
+                              >
+                                <CheckCircle2 className="w-4 h-4 mx-auto mb-1" />
+                                Approve Petition
+                              </motion.button>
+                            ) : (
+                              <motion.button
+                                whileHover={{ scale: 1.05 }}
+                                whileTap={{ scale: 0.95 }}
+                                onClick={() => handleClose(p._id)}
+                                className="bg-amber-100 text-amber-700 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-amber-200 transition-all border border-amber-200"
+                              >
+                                Close Petition
+                              </motion.button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Responses Section */}
+                    {p.responses?.length > 0 && (
+                      <div className="mt-8 space-y-4 pt-8 border-t-2 border-dashed border-slate-100">
+                        <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-3 mb-4">
+                          <ShieldCheck className="w-4 h-4 text-primary-500" />
+                          Official Verifications
+                        </h4>
+                        {p.responses.map((resp, i) => (
+                          <motion.div
+                            initial={{ opacity: 0, x: -10 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            key={i}
+                            className="bg-primary-50/50 rounded-2xl p-5 border border-primary-100 relative group/resp"
+                          >
+                            <div className="flex justify-between items-start mb-2">
+                              <div className="flex items-center gap-2">
+                                <div className="w-1.5 h-1.5 bg-primary-500 rounded-full animate-pulse"></div>
+                                <span className="text-[10px] font-black text-slate-900 uppercase tracking-tight">
+                                  {resp.officialId?.name || "Verified Official"}
+                                </span>
+                              </div>
+                              <span className="text-[8px] text-slate-400 font-bold uppercase">
+                                {new Date(resp.date).toLocaleDateString()}
+                              </span>
+                            </div>
+                            <p className="text-sm text-slate-700 font-bold italic leading-relaxed">
+                              "{resp.comment}"
+                            </p>
+                          </motion.div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
+        )}
+      </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex justify-center items-center gap-8 py-16">
+          <motion.button
+            whileHover={{ scale: 1.1, x: -5 }}
+            whileTap={{ scale: 0.9 }}
+            disabled={page === 1}
+            onClick={() => setPage(page - 1)}
+            className="p-4 rounded-2xl bg-white border border-slate-200 text-slate-400 disabled:opacity-30 hover:text-primary-600 hover:border-primary-200 transition-all shadow-sm"
+          >
+            <ChevronLeft className="w-6 h-6" />
+          </motion.button>
+          <div className="flex items-center gap-4 bg-white px-8 py-4 rounded-2xl border border-slate-100 shadow-sm">
+            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+              Page
+            </span>
+            <span className="text-2xl font-black text-slate-900">{page}</span>
+            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+              of {totalPages}
+            </span>
+          </div>
+          <motion.button
+            whileHover={{ scale: 1.1, x: 5 }}
+            whileTap={{ scale: 0.9 }}
+            disabled={page === totalPages}
+            onClick={() => setPage(page + 1)}
+            className="p-4 rounded-2xl bg-white border border-slate-200 text-slate-400 disabled:opacity-30 hover:text-primary-600 hover:border-primary-200 transition-all shadow-sm"
+          >
+            <ChevronRight className="w-6 h-6" />
+          </motion.button>
+        </div>
+      )}
+
+      {/* Create / Edit Modal */}
+      <AnimatePresence>
+        {(showCreate || editId) && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                setShowCreate(false);
+                setEditId(null);
+              }}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <CreatePetition
+                editId={editId}
+                close={() => {
+                  setShowCreate(false);
+                  setEditId(null);
+                  fetchPetitions();
+                }}
+              />
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+========================================
+FILE: frontend/src/pages/CreatePetition.jsx
+========================================
+import { useState, useEffect } from "react";
+import axios from "axios";
+import { motion } from "framer-motion";
+import API from "../services/api";
+import {
+  X,
+  FileText,
+  AlignLeft,
+  Tag,
+  MapPin,
+  Target,
+  Plus,
+  Save,
+} from "lucide-react";
+
+export default function CreatePetition({ editId, onBack, close }) {
+  const token = localStorage.getItem("token");
+  const [isLoading, setIsLoading] = useState(false);
+
+  const [form, setForm] = useState({
+    title: "",
+    description: "",
+    category: "",
+    location: "",
+    goal: 100,
+  });
+
+  useEffect(() => {
+    if (editId) {
+      axios
+        .get(`${API}/api/petitions/${editId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        .then((res) => {
+          setForm({
+            title: res.data.title,
+            description: res.data.description,
+            category: res.data.category,
+            location: res.data.location,
+            goal: res.data.goal,
+          });
+        });
+    }
+  }, [editId, token]);
+
+  const handleChange = (e) =>
+    setForm({ ...form, [e.target.name]: e.target.value });
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setIsLoading(true);
+
+    try {
+      if (editId) {
+        await axios.put(`${API}/api/petitions/${editId}`, form, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        alert("Petition Updated Successfully!");
+      } else {
+        await axios.post(`${API}/api/petitions`, form, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        alert("Petition Created Successfully!");
+      }
+
+      if (close) close();
+      if (onBack) onBack();
+    } catch (err) {
+      alert("Error saving petition");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleClose = () => {
+    if (close) close();
+    if (onBack) onBack();
+  };
+
+  return (
+    <div className="bg-white rounded-3xl overflow-hidden shadow-2xl">
+      <div className="px-8 py-6 border-b border-slate-100 flex items-center justify-between bg-white relative overflow-hidden">
+        <div className="relative z-10">
+          <h2 className="text-2xl font-black text-slate-900 tracking-tight flex items-center gap-3">
+            <div className="p-2 bg-primary-100 rounded-xl">
+              {editId ? (
+                <Save className="w-6 h-6 text-primary-600" />
+              ) : (
+                <Plus className="w-6 h-6 text-primary-600" />
+              )}
+            </div>
+            {editId ? "Update Petition" : "Launch New Petition"}
+          </h2>
+          <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-1 ml-11">
+            {editId
+              ? "Refine your cause for better engagement"
+              : "Start a movement in your community today"}
+          </p>
+        </div>
+        <button
+          onClick={handleClose}
+          className="p-3 hover:bg-slate-100 rounded-2xl transition-all text-slate-400 hover:text-red-500 relative z-10 border border-transparent hover:border-red-100"
+        >
+          <X className="w-6 h-6" />
+        </button>
+
+        {/* Abstract Background Shapes */}
+        <div className="absolute -right-4 -top-4 w-24 h-24 bg-primary-50 rounded-full blur-2xl opacity-50"></div>
+      </div>
+
+      <form onSubmit={handleSubmit} className="p-8 space-y-8">
+        <div className="space-y-3">
+          <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2 px-1">
+            <FileText className="w-4 h-4 text-primary-500" />
+            Petition Title
+          </label>
+          <input
+            name="title"
+            placeholder="e.g., Fix the potholes on Main Street"
+            className="input-field py-4 bg-slate-50 border-transparent focus:bg-white focus:border-primary-500 shadow-inner font-bold"
+            value={form.title}
+            onChange={handleChange}
+            required
+          />
+        </div>
+
+        <div className="space-y-3">
+          <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2 px-1">
+            <AlignLeft className="w-4 h-4 text-secondary-500" />
+            Description
+          </label>
+          <textarea
+            name="description"
+            placeholder="Provide details about the issue and your proposed solution..."
+            className="input-field min-h-[160px] resize-none py-4 bg-slate-50 border-transparent focus:bg-white focus:border-secondary-500 shadow-inner font-medium leading-relaxed"
+            value={form.description}
+            onChange={handleChange}
+            required
+          />
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+          <div className="space-y-3">
+            <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2 px-1">
+              <Tag className="w-4 h-4 text-emerald-500" />
+              Category
+            </label>
+            <div className="relative group">
+              <select
+                name="category"
+                className="input-field appearance-none bg-slate-50 border-transparent focus:bg-white focus:border-emerald-500 shadow-inner font-bold py-4 pr-10"
+                value={form.category}
+                onChange={handleChange}
+                required
+              >
+                <option value="">Select Category</option>
+                <option value="Environment">Environment</option>
+                <option value="Education">Education</option>
+                <option value="Infrastructure">Infrastructure</option>
+                <option value="Public Safety">Public Safety</option>
+                <option value="Healthcare">Healthcare</option>
+              </select>
+              <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400">
+                <Plus className="w-4 h-4 rotate-45" />
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2 px-1">
+              <MapPin className="w-4 h-4 text-blue-500" />
+              Location
+            </label>
+            <input
+              name="location"
+              placeholder="City, Neighborhood"
+              className="input-field py-4 bg-slate-50 border-transparent focus:bg-white focus:border-blue-500 shadow-inner font-bold"
+              value={form.location}
+              onChange={handleChange}
+              required
+            />
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2 px-1">
+            <Target className="w-4 h-4 text-amber-500" />
+            Signature Goal
+          </label>
+          <div className="relative">
+            <input
+              type="number"
+              name="goal"
+              placeholder="100"
+              className="input-field py-4 bg-slate-50 border-transparent focus:bg-white focus:border-amber-500 shadow-inner font-black"
+              value={form.goal}
+              onChange={handleChange}
+              min="10"
+            />
+            <div className="absolute right-4 top-1/2 -translate-y-1/2 text-[10px] font-black text-slate-400 uppercase">
+              Signatures
+            </div>
+          </div>
+          <p className="text-[9px] text-slate-400 font-black uppercase tracking-widest px-1">
+            Tip: Smaller goals are easier to reach and gain momentum
+          </p>
+        </div>
+
+        <div className="pt-6 flex flex-col sm:flex-row gap-4">
+          <button
+            type="button"
+            onClick={handleClose}
+            className="flex-1 py-4 px-6 rounded-2xl bg-slate-100 text-slate-600 text-xs font-black uppercase tracking-widest hover:bg-slate-200 transition-all border border-slate-200"
+          >
+            Discard
+          </button>
+          <motion.button
+            whileHover={{ scale: 1.02, y: -2 }}
+            whileTap={{ scale: 0.98 }}
+            disabled={isLoading}
+            type="submit"
+            className="flex-[2] py-4 px-8 rounded-2xl bg-primary-600 text-white text-xs font-black uppercase tracking-widest flex items-center justify-center gap-3 shadow-2xl shadow-primary-500/30 hover:bg-primary-700 transition-all"
+          >
+            {isLoading ? (
+              <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            ) : (
+              <>
+                <span>{editId ? "Update Changes" : "Launch Cause Now"}</span>
+                <Plus className="w-4 h-4" />
+              </>
+            )}
+          </motion.button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+========================================
+FILE: frontend/src/pages/AdminDashboard.jsx
+========================================
+import { useEffect, useState } from "react";
+import axios from "axios";
+import { motion, AnimatePresence } from "framer-motion";
+import BASE_URL from "../services/api";
+import socket from "../socket";
+import {
+  Users,
+  FileText,
+  BarChart3,
+  ShieldCheck,
+  Trash2,
+  CheckCircle2,
+  XCircle,
+  TrendingUp,
+  Search,
+  RefreshCw,
+  AlertCircle,
+  Ban,
+  ShieldAlert,
+  Edit3,
+  CheckCircle,
+  X,
+  Settings,
+  Bell,
+  Activity,
+  UserPlus,
+  ShieldCheck as ShieldCheckIcon,
+} from "lucide-react";
+
+const API = `${BASE_URL}/api/admin`;
+
+export default function AdminDashboard() {
+  const token = localStorage.getItem("token");
+  const headers = { Authorization: `Bearer ${token}` };
+
+  const [tab, setTab] = useState("overview");
+  const [stats, setStats] = useState(null);
+  const [users, setUsers] = useState([]);
+  const [petitions, setPetitions] = useState([]);
+  const [polls, setPolls] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState("");
+  const [roleFilter, setRoleFilter] = useState("");
+  const [petitionFilter, setPetitionFilter] = useState("");
+  const [actionLoading, setActionLoading] = useState({}); // per-item loading
+
+  // Platform Settings State
+  const [announcement, setAnnouncement] = useState("");
+  const [isAnnouncing, setIsAnnouncing] = useState(false);
+
+  // Edit Petition Modal State
+  const [editingPetition, setEditingPetition] = useState(null);
+  const [editForm, setEditForm] = useState({
+    title: "",
+    description: "",
+    category: "",
+    location: "",
+  });
+
+  useEffect(() => {
+    const refreshStats = () => {
+      fetchStats();
+    };
+
+    socket.on("petition:updated", refreshStats);
+    socket.on("pollUpdated", refreshStats);
+    socket.on("connect", refreshStats);
+
+    if (!socket.connected) {
+      socket.connect();
+    } else {
+      fetchStats();
+    }
+
+    return () => {
+      socket.off("petition:updated", refreshStats);
+      socket.off("pollUpdated", refreshStats);
+      socket.off("connect", refreshStats);
+    };
+  }, []);
+  useEffect(() => {
+    if (tab === "users") fetchUsers();
+  }, [tab, search, roleFilter]);
+  useEffect(() => {
+    if (tab === "petitions") fetchPetitions();
+  }, [tab, petitionFilter]);
+  useEffect(() => {
+    if (tab === "polls") fetchPolls();
+  }, [tab]);
+
+  const fetchStats = async () => {
+    try {
+      const res = await axios.get(`${API}/stats`, { headers });
+      setStats(res.data);
+    } catch {
+      /* silent */
+    }
+  };
+
+  const fetchUsers = async () => {
+    setLoading(true);
+    try {
+      const res = await axios.get(`${API}/users`, {
+        headers,
+        params: { search, role: roleFilter },
+      });
+      setUsers(res.data);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchPetitions = async () => {
+    setLoading(true);
+    try {
+      const res = await axios.get(`${API}/petitions`, {
+        headers,
+        params: { status: petitionFilter },
+      });
+      setPetitions(res.data);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchPolls = async () => {
+    setLoading(true);
+    try {
+      const res = await axios.get(`${API}/polls`, { headers });
+      setPolls(res.data);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const changeRole = async (id, role) => {
+    await axios.put(`${API}/users/${id}/role`, { role }, { headers });
+    fetchUsers();
+    fetchStats();
+  };
+
+  const toggleBan = async (id) => {
+    setActionLoading((p) => ({ ...p, [id + "_ban"]: true }));
+    try {
+      await axios.put(`${API}/users/${id}/ban`, {}, { headers });
+      fetchUsers();
+      fetchStats();
+    } finally {
+      setActionLoading((p) => ({ ...p, [id + "_ban"]: false }));
+    }
+  };
+
+  const toggleVerify = async (id) => {
+    setActionLoading((p) => ({ ...p, [id + "_verify"]: true }));
+    try {
+      await axios.put(`${API}/users/${id}/verify`, {}, { headers });
+      fetchUsers();
+    } finally {
+      setActionLoading((p) => ({ ...p, [id + "_verify"]: false }));
+    }
+  };
+
+  const startEditing = (p) => {
+    setEditingPetition(p);
+    setEditForm({
+      title: p.title,
+      description: p.description,
+      category: p.category,
+      location: p.location,
+    });
+  };
+
+  const handleEditSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      await axios.put(
+        `${API}/petitions/${editingPetition._id}/edit`,
+        editForm,
+        {
+          headers,
+        },
+      );
+      setEditingPetition(null);
+      fetchPetitions();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const deleteUser = async (id) => {
+    if (!window.confirm("Delete this user?")) return;
+    await axios.delete(`${API}/users/${id}`, { headers });
+    fetchUsers();
+    fetchStats();
+  };
+
+  const approvePetition = async (id) => {
+    setActionLoading((p) => ({ ...p, [id + "_approve"]: true }));
+    await axios.put(`${API}/petitions/${id}/approve`, {}, { headers });
+    setActionLoading((p) => ({ ...p, [id + "_approve"]: false }));
+    fetchPetitions();
+    fetchStats();
+  };
+
+  const updatePetitionStatus = async (id, status) => {
+    setActionLoading((p) => ({ ...p, [id + "_status"]: true }));
+    try {
+      await axios.put(`${API}/petitions/${id}/status`, { status }, { headers });
+      fetchPetitions();
+      fetchStats();
+    } finally {
+      setActionLoading((p) => ({ ...p, [id + "_status"]: false }));
+    }
+  };
+
+  const disapprovePetition = async (id) => {
+    setActionLoading((p) => ({ ...p, [id + "_disapprove"]: true }));
+    await axios.put(
+      `${API}/petitions/${id}/reject`,
+      { reason: "Disapproved by admin" },
+      { headers },
+    );
+    setActionLoading((p) => ({ ...p, [id + "_disapprove"]: false }));
+    fetchPetitions();
+    fetchStats();
+  };
+
+  const deletePetition = async (id) => {
+    if (!window.confirm("Delete this petition?")) return;
+    await axios.delete(`${API}/petitions/${id}`, { headers });
+    fetchPetitions();
+    fetchStats();
+  };
+
+  const closePoll = async (id) => {
+    setActionLoading((p) => ({ ...p, [id + "_close"]: true }));
+    await axios.put(`${API}/polls/${id}/close`, {}, { headers });
+    setActionLoading((p) => ({ ...p, [id + "_close"]: false }));
+    fetchPolls();
+  };
+
+  const openPoll = async (id) => {
+    setActionLoading((p) => ({ ...p, [id + "_open"]: true }));
+    await axios.put(`${API}/polls/${id}/open`, {}, { headers });
+    setActionLoading((p) => ({ ...p, [id + "_open"]: false }));
+    fetchPolls();
+  };
+
+  const deletePoll = async (id) => {
+    if (!window.confirm("Delete this poll?")) return;
+    await axios.delete(`${API}/polls/${id}`, { headers });
+    fetchPolls();
+  };
+
+  const tabs = [
+    { id: "overview", label: "Overview", icon: Activity },
+    { id: "petitions", label: "Petitions", icon: FileText },
+    { id: "users", label: "Users", icon: Users },
+    { id: "polls", label: "Polls", icon: BarChart3 },
+    { id: "settings", label: "Platform Settings", icon: Settings },
+  ];
+
+  const statusBadge = (status) => {
+    const map = {
+      active: "bg-green-100 text-green-700",
+      pending: "bg-amber-100 text-amber-700",
+      under_review: "bg-amber-100 text-amber-700",
+      closed: "bg-slate-100 text-slate-600",
+      rejected: "bg-red-100 text-red-700",
+      open: "bg-blue-100 text-blue-700",
+    };
+    return `px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-widest ${map[status] || "bg-slate-100 text-slate-600"}`;
+  };
+
+  const roleBadge = (role) => {
+    const map = {
+      admin: "bg-purple-100 text-purple-700",
+      official: "bg-blue-100 text-blue-700",
+      citizen: "bg-slate-100 text-slate-600",
+    };
+    return `px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-widest ${map[role] || "bg-slate-100 text-slate-600"}`;
+  };
+
+  return (
+    <div className="space-y-8">
+      {/* Header */}
+      <div className="flex items-center gap-3">
+        <div className="p-3 bg-purple-100 rounded-2xl">
+          <ShieldCheck className="w-6 h-6 text-purple-600" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-black text-slate-900">
+            Admin Dashboard
+          </h1>
+          <p className="text-slate-500 text-sm">
+            Manage the entire platform from here.
+          </p>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex p-1.5 bg-slate-100 rounded-2xl w-fit border border-slate-200 shadow-inner gap-1">
+        {tabs.map((t) => {
+          const Icon = t.icon;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`flex items-center gap-2 px-5 py-2 rounded-xl text-xs font-black transition-all capitalize tracking-widest ${
+                tab === t.id
+                  ? "bg-white text-purple-600 shadow-md"
+                  : "text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              <Icon className="w-4 h-4" /> {t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      <AnimatePresence mode="wait">
+        {/* ── OVERVIEW ── */}
+        {tab === "overview" && stats && (
+          <motion.div
+            key="overview"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="space-y-8"
+          >
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
+              {[
+                {
+                  label: "Total Users",
+                  value: stats.totalUsers,
+                  icon: Users,
+                  color: "bg-purple-500",
+                },
+                {
+                  label: "Total Petitions",
+                  value: stats.totalPetitions,
+                  icon: FileText,
+                  color: "bg-blue-500",
+                },
+                {
+                  label: "Pending Review",
+                  value: stats.pendingPetitions,
+                  icon: AlertCircle,
+                  color: "bg-amber-500",
+                },
+                {
+                  label: "Total Polls",
+                  value: stats.totalPolls,
+                  icon: BarChart3,
+                  color: "bg-green-500",
+                },
+                {
+                  label: "Banned Users",
+                  value: stats.bannedUsers || 0,
+                  icon: ShieldAlert,
+                  color: "bg-red-500",
+                },
+              ].map((s, i) => (
+                <motion.div
+                  key={s.label}
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ delay: i * 0.08 }}
+                  className="card p-6 border-l-4 border-l-purple-400"
+                >
+                  <div className="flex items-center justify-between mb-4">
+                    <div className={`p-3 rounded-xl ${s.color} bg-opacity-10`}>
+                      <s.icon
+                        className={`w-5 h-5 ${s.color.replace("bg-", "text-")}`}
+                      />
+                    </div>
+                  </div>
+                  <div className="text-3xl font-black text-slate-900">
+                    {s.value}
+                  </div>
+                  <div className="text-xs text-slate-500 font-bold uppercase tracking-wider mt-1">
+                    {s.label}
+                  </div>
+                </motion.div>
+              ))}
+            </div>
+
+            {/* Role breakdown */}
+            <div className="card p-6">
+              <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-6">
+                User Role Breakdown
+              </h3>
+              <div className="flex flex-wrap gap-4">
+                {stats.roleBreakdown.map((r) => (
+                  <div
+                    key={r._id}
+                    className="flex items-center gap-3 bg-slate-50 rounded-2xl px-5 py-4 border border-slate-100"
+                  >
+                    <span className={roleBadge(r._id)}>{r._id}</span>
+                    <span className="text-2xl font-black text-slate-900">
+                      {r.count}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* ── PETITIONS ── */}
+        {tab === "petitions" && (
+          <motion.div
+            key="petitions"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="space-y-6"
+          >
+            <div className="flex flex-wrap gap-3 items-center">
+              <select
+                value={petitionFilter}
+                onChange={(e) => setPetitionFilter(e.target.value)}
+                className="input-field py-2.5 text-sm w-48"
+              >
+                <option value="">All Statuses</option>
+                <option value="pending">Pending</option>
+                <option value="active">Active</option>
+                <option value="rejected">Rejected</option>
+                <option value="closed">Closed</option>
+              </select>
+              <button
+                onClick={fetchPetitions}
+                className="p-2.5 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
+              >
+                <RefreshCw className="w-4 h-4 text-slate-500" />
+              </button>
+            </div>
+
+            {loading ? (
+              <div className="flex justify-center py-16">
+                <div className="w-10 h-10 border-4 border-purple-200 border-t-purple-600 rounded-full animate-spin" />
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {petitions.map((p) => (
+                  <motion.div
+                    key={p._id}
+                    layout
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="card p-6"
+                  >
+                    <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                      <div className="flex-1 space-y-2">
+                        <div className="flex flex-wrap gap-2 items-center">
+                          <span className={statusBadge(p.status)}>
+                            {p.status.replace("_", " ")}
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                            {p.category}
+                          </span>
+                        </div>
+                        <h3 className="text-lg font-black text-slate-900">
+                          {p.title}
+                        </h3>
+                        <p className="text-sm text-slate-500 line-clamp-2">
+                          {p.description}
+                        </p>
+                        <div className="flex flex-wrap gap-4 text-xs text-slate-400 font-bold pt-1">
+                          <span>By: {p.createdBy?.name}</span>
+                          <span>Location: {p.location}</span>
+                          <span>
+                            Signatures: {p.signatures?.length || 0} / {p.goal}
+                          </span>
+                          <span>
+                            {new Date(p.createdAt).toLocaleDateString()}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-3 shrink-0">
+                        {/* Status Select */}
+                        <div className="relative group">
+                          <select
+                            value={p.status}
+                            onChange={(e) =>
+                              updatePetitionStatus(p._id, e.target.value)
+                            }
+                            disabled={actionLoading[p._id + "_status"]}
+                            className={`text-[10px] font-black uppercase tracking-widest border border-slate-200 rounded-xl px-4 py-2.5 bg-white cursor-pointer transition-all ${
+                              actionLoading[p._id + "_status"]
+                                ? "opacity-50"
+                                : ""
+                            }`}
+                          >
+                            <option value="pending">Pending</option>
+                            <option value="active">Active</option>
+                            <option value="under_review">Under Review</option>
+                            <option value="closed">Closed</option>
+                            <option value="rejected">Rejected</option>
+                          </select>
+                          {actionLoading[p._id + "_status"] && (
+                            <RefreshCw className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-purple-500 animate-spin" />
+                          )}
+                        </div>
+
+                        <div className="h-8 w-px bg-slate-100 hidden md:block"></div>
+
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={() => approvePetition(p._id)}
+                          disabled={
+                            p.status === "active" ||
+                            actionLoading[p._id + "_approve"]
+                          }
+                          className="flex items-center gap-1.5 px-5 py-2.5 bg-emerald-500 text-white rounded-xl text-xs font-black hover:bg-emerald-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-emerald-500/20"
+                        >
+                          {actionLoading[p._id + "_approve"] ? (
+                            <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          ) : (
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                          )}
+                          Approve
+                        </motion.button>
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={() => disapprovePetition(p._id)}
+                          disabled={
+                            p.status === "rejected" ||
+                            p.status === "closed" ||
+                            actionLoading[p._id + "_disapprove"]
+                          }
+                          className="flex items-center gap-1.5 px-5 py-2.5 bg-red-500 text-white rounded-xl text-xs font-black hover:bg-red-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-red-500/20"
+                        >
+                          {actionLoading[p._id + "_disapprove"] ? (
+                            <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          ) : (
+                            <XCircle className="w-3.5 h-3.5" />
+                          )}
+                          Reject
+                        </motion.button>
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={() => startEditing(p)}
+                          className="p-2.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-colors border border-slate-200"
+                          title="Edit Content"
+                        >
+                          <Edit3 className="w-4 h-4" />
+                        </motion.button>
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={() => deletePetition(p._id)}
+                          className="p-2.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors border border-slate-200"
+                          title="Delete"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </motion.button>
+                      </div>
+                    </div>
+                  </motion.div>
+                ))}
+                {petitions.length === 0 && (
+                  <div className="card p-16 text-center text-slate-400">
+                    <AlertCircle className="w-10 h-10 mx-auto mb-3 opacity-30" />
+                    <p className="font-bold">No petitions found</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </motion.div>
+        )}
+
+        {/* ── USERS ── */}
+        {tab === "users" && (
+          <motion.div
+            key="users"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="space-y-6"
+          >
+            <div className="flex flex-wrap gap-3 items-center">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input
+                  className="input-field pl-10 py-2.5 text-sm w-56"
+                  placeholder="Search by name..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </div>
+              <select
+                value={roleFilter}
+                onChange={(e) => setRoleFilter(e.target.value)}
+                className="input-field py-2.5 text-sm w-40"
+              >
+                <option value="">All Roles</option>
+                <option value="citizen">Citizen</option>
+                <option value="official">Official</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+
+            {loading ? (
+              <div className="flex justify-center py-16">
+                <div className="w-10 h-10 border-4 border-purple-200 border-t-purple-600 rounded-full animate-spin" />
+              </div>
+            ) : (
+              <div className="card overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 border-b border-slate-100">
+                    <tr>
+                      {[
+                        "Name",
+                        "Email",
+                        "Role",
+                        "Location",
+                        "Joined",
+                        "Actions",
+                      ].map((h) => (
+                        <th
+                          key={h}
+                          className="text-left px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest"
+                        >
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {users.map((u) => (
+                      <tr
+                        key={u._id}
+                        className={`hover:bg-slate-50 transition-colors ${u.isBanned ? "bg-red-50/30" : ""}`}
+                      >
+                        <td className="px-6 py-4">
+                          <div className="flex flex-col">
+                            <span className="font-bold text-slate-900 flex items-center gap-2">
+                              {u.name}
+                              {u.isVerified && (
+                                <CheckCircle className="w-3.5 h-3.5 text-blue-500" />
+                              )}
+                              {u.isBanned && (
+                                <Ban className="w-3.5 h-3.5 text-red-500" />
+                              )}
+                            </span>
+                            <span className="text-[10px] text-slate-400 font-bold uppercase">
+                              ID: {u._id.slice(-6)}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 text-slate-500">{u.email}</td>
+                        <td className="px-6 py-4">
+                          <select
+                            value={u.role}
+                            onChange={(e) => changeRole(u._id, e.target.value)}
+                            className="text-[10px] font-black uppercase tracking-widest border border-slate-200 rounded-lg px-2 py-1 bg-white cursor-pointer"
+                          >
+                            <option value="citizen">Citizen</option>
+                            <option value="official">Official</option>
+                            <option value="admin">Admin</option>
+                          </select>
+                        </td>
+                        <td className="px-6 py-4 text-slate-500">
+                          {u.location || "—"}
+                        </td>
+                        <td className="px-6 py-4 text-slate-400 text-xs">
+                          {new Date(u.createdAt).toLocaleDateString()}
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-2">
+                            {u.role === "official" && (
+                              <motion.button
+                                whileHover={{ scale: 1.1 }}
+                                whileTap={{ scale: 0.9 }}
+                                onClick={() => toggleVerify(u._id)}
+                                disabled={actionLoading[u._id + "_verify"]}
+                                className={`p-2 rounded-xl transition-all border ${
+                                  u.isVerified
+                                    ? "bg-blue-500 text-white border-blue-600 shadow-md shadow-blue-500/20"
+                                    : "text-slate-400 hover:text-blue-500 hover:bg-blue-50 border-slate-200"
+                                }`}
+                                title={
+                                  u.isVerified
+                                    ? "Unverify Official"
+                                    : "Verify Official"
+                                }
+                              >
+                                {actionLoading[u._id + "_verify"] ? (
+                                  <RefreshCw className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <ShieldCheck className="w-4 h-4" />
+                                )}
+                              </motion.button>
+                            )}
+                            <motion.button
+                              whileHover={{ scale: 1.1 }}
+                              whileTap={{ scale: 0.9 }}
+                              onClick={() => toggleBan(u._id)}
+                              disabled={
+                                u.role === "admin" ||
+                                actionLoading[u._id + "_ban"]
+                              }
+                              className={`p-2 rounded-xl transition-all border ${
+                                u.isBanned
+                                  ? "bg-red-500 text-white border-red-600 shadow-md shadow-red-500/20"
+                                  : "text-slate-400 hover:text-red-500 hover:bg-red-50 border-slate-200"
+                              } ${u.role === "admin" ? "opacity-20 cursor-not-allowed" : ""}`}
+                              title={u.isBanned ? "Unban User" : "Ban User"}
+                            >
+                              {actionLoading[u._id + "_ban"] ? (
+                                <RefreshCw className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <Ban className="w-4 h-4" />
+                              )}
+                            </motion.button>
+                            <button
+                              onClick={() => deleteUser(u._id)}
+                              className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors border border-slate-200"
+                              title="Delete Account"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {users.length === 0 && (
+                  <div className="p-16 text-center text-slate-400">
+                    <Users className="w-10 h-10 mx-auto mb-3 opacity-30" />
+                    <p className="font-bold">No users found</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </motion.div>
+        )}
+
+        {/* ── POLLS ── */}
+        {tab === "polls" && (
+          <motion.div
+            key="polls"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="space-y-4"
+          >
+            {loading ? (
+              <div className="flex justify-center py-16">
+                <div className="w-10 h-10 border-4 border-purple-200 border-t-purple-600 rounded-full animate-spin" />
+              </div>
+            ) : (
+              polls.map((poll) => {
+                const totalVotes = poll.options.reduce(
+                  (s, o) => s + o.votes,
+                  0,
+                );
+                return (
+                  <motion.div
+                    key={poll._id}
+                    layout
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="card p-6"
+                  >
+                    <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                      <div className="flex-1 space-y-2">
+                        <div className="flex gap-2 items-center">
+                          <span className={statusBadge(poll.status)}>
+                            {poll.status}
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-bold">
+                            {poll.location}
+                          </span>
+                        </div>
+                        <h3 className="text-lg font-black text-slate-900">
+                          {poll.question}
+                        </h3>
+                        <p className="text-sm text-slate-500 line-clamp-1">
+                          {poll.description}
+                        </p>
+                        <div className="flex flex-wrap gap-4 text-xs text-slate-400 font-bold pt-1">
+                          <span>By: {poll.createdBy?.name}</span>
+                          <span>Total votes: {totalVotes}</span>
+                          <span>
+                            {new Date(poll.createdAt).toLocaleDateString()}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 shrink-0">
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={() => openPoll(poll._id)}
+                          disabled={
+                            poll.status === "open" ||
+                            actionLoading[poll._id + "_open"]
+                          }
+                          className="flex items-center gap-1.5 px-5 py-2.5 bg-green-500 text-white rounded-xl text-xs font-black hover:bg-green-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-green-500/20"
+                        >
+                          {actionLoading[poll._id + "_open"] ? (
+                            <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          ) : (
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                          )}
+                          Approve
+                        </motion.button>
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={() => closePoll(poll._id)}
+                          disabled={
+                            poll.status === "closed" ||
+                            actionLoading[poll._id + "_close"]
+                          }
+                          className="flex items-center gap-1.5 px-5 py-2.5 bg-red-500 text-white rounded-xl text-xs font-black hover:bg-red-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-red-500/20"
+                        >
+                          {actionLoading[poll._id + "_close"] ? (
+                            <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          ) : (
+                            <XCircle className="w-3.5 h-3.5" />
+                          )}
+                          Disapprove
+                        </motion.button>
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={() => deletePoll(poll._id)}
+                          className="p-2.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors border border-slate-200"
+                          title="Delete"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </motion.button>
+                      </div>
+                    </div>
+                  </motion.div>
+                );
+              })
+            )}
+            {!loading && polls.length === 0 && (
+              <div className="card p-16 text-center text-slate-400">
+                <BarChart3 className="w-10 h-10 mx-auto mb-3 opacity-30" />
+                <p className="font-bold">No polls found</p>
+              </div>
+            )}
+          </motion.div>
+        )}
+
+        {/* ── SETTINGS ── */}
+        {tab === "settings" && (
+          <motion.div
+            key="settings"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="grid grid-cols-1 lg:grid-cols-2 gap-8"
+          >
+            {/* Global Announcements */}
+            <div className="card p-8 space-y-6">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="p-2 bg-purple-100 rounded-xl">
+                  <Bell className="w-5 h-5 text-purple-600" />
+                </div>
+                <h3 className="text-lg font-black text-slate-900">
+                  Global Announcement
+                </h3>
+              </div>
+              <p className="text-sm text-slate-500 font-medium">
+                Broadcast a message to all users on their dashboard.
+              </p>
+              <textarea
+                value={announcement}
+                onChange={(e) => setAnnouncement(e.target.value)}
+                placeholder="Type your announcement here..."
+                className="input-field min-h-[120px] resize-none py-4 text-sm font-medium"
+              />
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => {
+                  setIsAnnouncing(true);
+                  setTimeout(() => {
+                    setIsAnnouncing(false);
+                    setAnnouncement("");
+                    alert("Announcement broadcasted successfully!");
+                  }, 1500);
+                }}
+                disabled={!announcement || isAnnouncing}
+                className="w-full py-4 bg-purple-600 text-white rounded-2xl text-sm font-black uppercase tracking-widest hover:bg-purple-700 transition-all shadow-xl shadow-purple-600/20 disabled:opacity-50"
+              >
+                {isAnnouncing ? (
+                  <RefreshCw className="w-5 h-5 animate-spin mx-auto" />
+                ) : (
+                  "Broadcast Message"
+                )}
+              </motion.button>
+            </div>
+
+            {/* Quick Actions */}
+            <div className="card p-8 space-y-6">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="p-2 bg-blue-100 rounded-xl">
+                  <Activity className="w-5 h-5 text-blue-600" />
+                </div>
+                <h3 className="text-lg font-black text-slate-900">
+                  Quick Moderation
+                </h3>
+              </div>
+              <div className="grid grid-cols-1 gap-3">
+                <button className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100 hover:bg-white transition-all group">
+                  <div className="flex items-center gap-3">
+                    <UserPlus className="w-5 h-5 text-slate-400 group-hover:text-blue-500" />
+                    <span className="text-sm font-bold text-slate-700">
+                      Pending Official Verifications
+                    </span>
+                  </div>
+                  <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded-lg text-[10px] font-black">
+                    {users.filter((u) => u.role === "official" && !u.isVerified)
+                      .length || 0}
+                  </span>
+                </button>
+                <button className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100 hover:bg-white transition-all group">
+                  <div className="flex items-center gap-3">
+                    <AlertCircle className="w-5 h-5 text-slate-400 group-hover:text-amber-500" />
+                    <span className="text-sm font-bold text-slate-700">
+                      Reports Needing Attention
+                    </span>
+                  </div>
+                  <span className="px-2 py-1 bg-amber-100 text-amber-700 rounded-lg text-[10px] font-black">
+                    12
+                  </span>
+                </button>
+                <button className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100 hover:bg-white transition-all group">
+                  <div className="flex items-center gap-3">
+                    <ShieldAlert className="w-5 h-5 text-slate-400 group-hover:text-red-500" />
+                    <span className="text-sm font-bold text-slate-700">
+                      Recently Banned Users
+                    </span>
+                  </div>
+                  <span className="px-2 py-1 bg-red-100 text-red-700 rounded-lg text-[10px] font-black">
+                    {stats.bannedUsers || 0}
+                  </span>
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── EDIT MODAL ── */}
+      <AnimatePresence>
+        {editingPetition && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setEditingPetition(null)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-xl bg-white rounded-3xl shadow-2xl overflow-hidden p-8"
+            >
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-xl font-black text-slate-900 uppercase tracking-tight">
+                  Edit Petition Content
+                </h2>
+                <button
+                  onClick={() => setEditingPetition(null)}
+                  className="p-2 hover:bg-slate-100 rounded-xl transition-colors"
+                >
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
+              </div>
+
+              <form onSubmit={handleEditSubmit} className="space-y-4">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                    Title
+                  </label>
+                  <input
+                    className="input-field py-3 font-bold"
+                    value={editForm.title}
+                    onChange={(e) =>
+                      setEditForm({ ...editForm, title: e.target.value })
+                    }
+                    required
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                    Description
+                  </label>
+                  <textarea
+                    className="input-field py-3 min-h-[120px] resize-none"
+                    value={editForm.description}
+                    onChange={(e) =>
+                      setEditForm({ ...editForm, description: e.target.value })
+                    }
+                    required
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                      Category
+                    </label>
+                    <input
+                      className="input-field py-3"
+                      value={editForm.category}
+                      onChange={(e) =>
+                        setEditForm({ ...editForm, category: e.target.value })
+                      }
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                      Location
+                    </label>
+                    <input
+                      className="input-field py-3"
+                      value={editForm.location}
+                      onChange={(e) =>
+                        setEditForm({ ...editForm, location: e.target.value })
+                      }
+                      required
+                    />
+                  </div>
+                </div>
+                <div className="pt-4 flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setEditingPetition(null)}
+                    className="flex-1 py-3 text-sm font-black text-slate-500 hover:bg-slate-50 rounded-2xl transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="flex-1 py-3 bg-purple-600 text-white rounded-2xl text-sm font-black uppercase tracking-widest hover:bg-purple-700 transition-colors shadow-lg shadow-purple-600/20 disabled:opacity-50"
+                  >
+                    {loading ? "Saving..." : "Save Changes"}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+========== PACKAGE CONFIGURATION ==========
+FILE: backend/package.json
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.13.5",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "json2csv": "^6.0.0-alpha.2",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.2.1",
+    "multer": "^2.1.1",
+    "nodemailer": "^8.0.1",
+    "pdfkit": "^0.17.2",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14",
+    "vitest": "^5.1.2"
+  }
+}
+FILE: frontend/package.json
+{
+  "name": "civix-client",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "axios": "^1.13.6",
+    "chart.js": "^4.4.0",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.38.0",
+    "lucide-react": "^1.7.0",
+    "react": "^18.2.0",
+    "react-chartjs-2": "^5.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.30.3",
+    "recharts": "^3.7.0",
+    "socket.io-client": "^4.8.3",
+    "tailwind-merge": "^3.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.0.3",
+    "autoprefixer": "^10.4.27",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^3.4.19",
+    "vite": "^5.0.0"
+  }
+}

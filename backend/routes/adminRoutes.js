@@ -7,6 +7,26 @@ const Notification = require("../models/Notification");
 const adminAuth = require("../middleware/adminMiddleware");
 const sendEmail = require("../utils/sendEmail");
 
+// Save and emit a notification to the intended user.
+const createAndEmitNotification = async (req, userId, message) => {
+  const notification = await Notification.create({
+    userId,
+    message,
+  });
+
+  const io = req.app.get("io");
+
+  if (io) {
+    io.to(`user:${userId.toString()}`).emit(
+      "notification:new",
+      notification
+    );
+  }
+
+  return notification;
+};
+
+
 /* ─── STATS ─────────────────────────────────────────── */
 router.get("/stats", adminAuth, async (req, res) => {
   try {
@@ -160,10 +180,11 @@ router.put("/petitions/:id/approve", adminAuth, async (req, res) => {
     petition.status = "active";
     await petition.save();
 
-    await Notification.create({
-      userId: petition.createdBy._id,
-      message: `Your petition "${petition.title}" has been approved by admin.`,
-    });
+    await createAndEmitNotification(
+      req,
+      petition.createdBy._id,
+      `Your petition "${petition.title}" has been approved by admin.`
+    );
 
     if (petition.createdBy.notifications) {
       await sendEmail(
@@ -192,10 +213,11 @@ router.put("/petitions/:id/reject", adminAuth, async (req, res) => {
     petition.status = "rejected";
     await petition.save();
 
-    await Notification.create({
-      userId: petition.createdBy._id,
-      message: `Your petition "${petition.title}" was rejected. Reason: ${reason || "N/A"}`,
-    });
+    await createAndEmitNotification(
+      req,
+      petition.createdBy._id,
+      `Your petition "${petition.title}" was rejected. Reason: ${reason || "N/A"}`
+    );
 
     if (petition.createdBy.notifications) {
       await sendEmail(
@@ -233,10 +255,11 @@ router.put("/petitions/:id/status", adminAuth, async (req, res) => {
     if (!petition)
       return res.status(404).json({ message: "Petition not found" });
 
-    await Notification.create({
-      userId: petition.createdBy._id,
-      message: `Your petition status changed to: ${status.replace("_", " ")}`,
-    });
+    await createAndEmitNotification(
+      req,
+      petition.createdBy._id,
+      `Your petition status changed to: ${status.replace("_", " ")}`
+    );
 
     res.json({ message: "Status updated", petition });
   } catch (err) {

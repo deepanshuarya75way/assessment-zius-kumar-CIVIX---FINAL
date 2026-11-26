@@ -1,0 +1,1810 @@
+
+==========================================
+FILE: backend/server.js
+==========================================
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const http = require("http");
+const jwt = require("jsonwebtoken");
+const { Server } = require("socket.io");
+require("dotenv").config();
+
+const app = express();
+const server = http.createServer(app);
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://civix-frontend.onrender.com",
+  /\.onrender\.com$/,
+  /\.netlify\.app$/,
+];
+
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+}));
+
+app.use(express.json());
+
+app.get("/", (req, res) => {
+  res.send("CIVIX Backend is Running 🚀");
+});
+
+// MongoDB connection
+mongoose
+  .connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB Connected"))
+  .catch((err) => console.error("MongoDB error:", err));
+
+// Socket.IO with reconnection recovery
+const io = new Server(server, {
+  cors: {
+    origin: allowedOrigins,
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true,
+  },
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000,
+    skipMiddlewares: false,
+  },
+});
+
+// Authenticate socket connections using the existing JWT
+io.use((socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token;
+
+    if (!token) {
+      return next(new Error("Authentication required"));
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (!decoded.id) {
+      return next(new Error("Invalid token payload"));
+    }
+
+    socket.userId = decoded.id;
+    next();
+  } catch (error) {
+    next(new Error("Invalid or expired token"));
+  }
+});
+
+io.on("connection", (socket) => {
+  socket.join(`user:${socket.userId}`);
+
+  console.log("Authenticated socket connected:", socket.userId);
+
+  socket.on("disconnect", (reason) => {
+    console.log("Socket disconnected:", socket.userId, reason);
+  });
+});
+
+app.set("io", io);
+
+// Routes
+app.use("/api/auth", require("./routes/authRoutes"));
+app.use("/api/dashboard", require("./routes/dashboard"));
+app.use("/api/petitions", require("./routes/petitionRoutes"));
+app.use("/api/polls", require("./routes/polls"));
+app.use("/api/reports", require("./routes/reports"));
+app.use("/api/officials", require("./routes/officialRoutes"));
+app.use("/uploads", express.static("uploads"));
+app.use("/api/settings", require("./routes/settingsRoutes"));
+app.use("/api/notifications", require("./routes/notificationRoutes"));
+app.use("/api/admin", require("./routes/adminRoutes"));
+
+const PORT = process.env.PORT || 5000;
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+==========================================
+FILE: backend/package.json
+==========================================
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.13.5",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "json2csv": "^6.0.0-alpha.2",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.2.1",
+    "multer": "^2.1.1",
+    "nodemailer": "^8.0.1",
+    "pdfkit": "^0.17.2",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14",
+    "vitest": "^5.1.2"
+  }
+}
+
+==========================================
+FILE: frontend/package.json
+==========================================
+{
+  "name": "civix-client",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "axios": "^1.13.6",
+    "chart.js": "^4.4.0",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.38.0",
+    "lucide-react": "^1.7.0",
+    "react": "^18.2.0",
+    "react-chartjs-2": "^5.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.30.3",
+    "recharts": "^3.7.0",
+    "socket.io-client": "^4.8.3",
+    "tailwind-merge": "^3.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.0.3",
+    "autoprefixer": "^10.4.27",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^3.4.19",
+    "vite": "^5.0.0"
+  }
+}
+
+==========================================
+FILE: frontend/src/socket.js
+==========================================
+import { io } from "socket.io-client";
+import API from "./services/api";
+
+const socket = io(API, {
+  autoConnect: false,
+  reconnection: true,
+  reconnectionAttempts: Infinity,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
+  auth: (callback) => {
+    callback({
+      token: localStorage.getItem("token"),
+    });
+  },
+});
+
+export default socket;
+
+==========================================
+FILE: frontend/src/services/api.js
+==========================================
+const API = import.meta.env.VITE_API_URL;
+
+if (!API) {
+  throw new Error("VITE_API_URL is missing. Check frontend/.env");
+}
+
+export default API.replace(/\/+$/, "");
+==========================================
+FILE: frontend/src/api.js
+==========================================
+import axios from "axios";
+import BASE_URL from "./services/api";
+
+const API = axios.create({
+  baseURL: `${BASE_URL}/api`,
+});
+
+API.interceptors.request.use((config) => {
+  const token = localStorage.getItem("token");
+
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+
+  return config;
+});
+
+export default API;
+
+==========================================
+FILE: frontend/src/components/Navbar.jsx
+==========================================
+import { Link, useNavigate, useLocation } from "react-router-dom";
+import { motion, AnimatePresence } from "framer-motion";
+import { 
+  LayoutDashboard, 
+  FileText, 
+  BarChart3, 
+  Users, 
+  AlertCircle, 
+  Settings, 
+  HelpCircle,
+  LogOut,
+  Bell,
+  Menu,
+  X
+} from "lucide-react";
+import { useState, useEffect } from "react";
+import API from "../api";
+import socket from "../socket";
+import { clsx } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+function cn(...inputs) {
+  return twMerge(clsx(inputs));
+}
+
+export default function Navbar() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [isOpen, setIsOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+
+    const fetchNotifications = async () => {
+      try {
+        const response = await API.get("/notifications");
+        if (active) {
+          setUnreadCount(
+            response.data.filter((notification) => !notification.read).length
+          );
+        }
+      } catch (error) {
+        console.error("Failed to fetch notifications:", error);
+      }
+    };
+
+    const handleNewNotification = (notification) => {
+      if (!active) return;
+      setUnreadCount((count) => count + 1);
+    };
+
+    fetchNotifications();
+
+    socket.on("notification:new", handleNewNotification);
+    socket.on("connect", fetchNotifications);
+
+    if (!socket.connected) socket.connect();
+
+    return () => {
+      active = false;
+      socket.off("notification:new", handleNewNotification);
+      socket.off("connect", fetchNotifications);
+    };
+  }, []);
+
+  const user = JSON.parse(localStorage.getItem("user"));
+
+  const logout = () => {
+    localStorage.clear();
+    navigate("/");
+  };
+
+  const navItems = [
+    { name: "Dashboard", path: "/dashboard", icon: LayoutDashboard },
+    { name: "Petitions", path: "/petitions", icon: FileText },
+    { name: "Polls", path: "/polls", icon: BarChart3 },
+    { name: "Officials", path: "/officials", icon: Users },
+    { name: "Reports", path: "/reports", icon: AlertCircle },
+    { name: "Settings", path: "/settings", icon: Settings },
+    { name: "Help", path: "/help-support", icon: HelpCircle },
+  ];
+
+  if (!user) return null;
+
+  return (
+    <nav className="sticky top-0 z-50 w-full bg-white/80 backdrop-blur-md border-b border-slate-200">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex justify-between h-16">
+          <div className="flex items-center">
+            <Link to="/dashboard" className="flex items-center gap-2 group">
+              <div className="w-10 h-10 bg-primary-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-primary-500/20 group-hover:scale-110 transition-transform">
+                <span className="text-xl font-bold">C</span>
+              </div>
+              <span className="text-xl font-bold text-slate-900 tracking-tight">Civix</span>
+            </Link>
+          </div>
+
+          {/* Desktop Nav */}
+          <div className="hidden md:flex items-center gap-1">
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              const isActive = location.pathname === item.path;
+              return (
+                <Link
+                  key={item.path}
+                  to={item.path}
+                  className={cn(
+                    "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all relative",
+                    isActive 
+                      ? "text-primary-600 bg-primary-50" 
+                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+                  )}
+                >
+                  <Icon className="w-4 h-4" />
+                  {item.name}
+                  {isActive && (
+                    <motion.div
+                      layoutId="activeNav"
+                      className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary-600 mx-4"
+                      transition={{ type: "spring", stiffness: 380, damping: 30 }}
+                    />
+                  )}
+                </Link>
+              );
+            })}
+          </div>
+
+          <div className="hidden md:flex items-center gap-4 border-l border-slate-200 ml-4 pl-4">
+            <button
+              className="relative p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-full transition-colors"
+              title={`${unreadCount} unread notifications`}
+              onClick={() => navigate("/notifications")}
+            >
+              <Bell className="w-5 h-5" />
+              {unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-5 h-5 px-1 bg-red-500 text-white text-xs font-bold rounded-full flex items-center justify-center border-2 border-white">
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </span>
+              )}
+            </button>
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-slate-700 font-bold overflow-hidden border border-slate-300">
+                {user.profilePhoto ? (
+                  <img src={`${API}/uploads/${user.profilePhoto}`} alt="" className="w-full h-full object-cover" />
+                ) : (
+                  user.name?.charAt(0).toUpperCase()
+                )}
+              </div>
+              <button 
+                onClick={logout}
+                className="p-2 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-full transition-colors"
+                title="Logout"
+              >
+                <LogOut className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Mobile menu button */}
+          <div className="md:hidden flex items-center">
+            <button
+              onClick={() => setIsOpen(!isOpen)}
+              className="p-2 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100"
+            >
+              {isOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Mobile menu */}
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="md:hidden bg-white border-b border-slate-200 overflow-hidden"
+          >
+            <div className="px-2 pt-2 pb-3 space-y-1">
+              {navItems.map((item) => {
+                const Icon = item.icon;
+                const isActive = location.pathname === item.path;
+                return (
+                  <Link
+                    key={item.path}
+                    to={item.path}
+                    onClick={() => setIsOpen(false)}
+                    className={cn(
+                      "flex items-center gap-3 px-4 py-3 rounded-lg text-base font-medium transition-colors",
+                      isActive 
+                        ? "text-primary-600 bg-primary-50" 
+                        : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+                    )}
+                  >
+                    <Icon className="w-5 h-5" />
+                    {item.name}
+                  </Link>
+                );
+              })}
+              <button
+                onClick={logout}
+                className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-base font-medium text-red-600 hover:bg-red-50 transition-colors"
+              >
+                <LogOut className="w-5 h-5" />
+                Logout
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </nav>
+  );
+}
+
+==========================================
+FILE: frontend/src/App.jsx
+==========================================
+import { Routes, Route } from "react-router-dom";
+import Login from "./pages/Login";
+import Register from "./pages/Register";
+import Dashboard from "./pages/Dashboard";
+import Petitions from "./pages/Petitions";
+import CreatePetition from "./pages/CreatePetition";
+import Polls from "./pages/Polls";
+import CreatePoll from "./pages/CreatePoll";
+import Reports from "./pages/Reports";
+import Navbar from "./components/Navbar";
+import ProtectedRoute from "./components/ProtectedRoute";
+import ForgotPassword from "./pages/ForgotPassword";
+import ResetPassword from "./pages/ResetPassword";
+import HelpSupport from "./pages/HelpSupport";
+import Settings from "./pages/Settings";
+
+
+function App() {
+  return (
+    <>
+      <Navbar />
+      <Routes>
+        <Route path="/" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+
+        {/* NEW ROUTES */}
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
+
+        <Route path="/dashboard" element={
+          <ProtectedRoute><Dashboard /></ProtectedRoute>
+        } />
+
+        <Route path="/petitions" element={
+          <ProtectedRoute><Petitions /></ProtectedRoute>
+        } />
+
+        <Route path="/create-petition" element={
+          <ProtectedRoute><CreatePetition /></ProtectedRoute>
+        } />
+
+        <Route path="/polls" element={
+          <ProtectedRoute><Polls /></ProtectedRoute>
+        } />
+
+      <Route
+  path="/help-support"
+  element={
+    <ProtectedRoute>
+      <HelpSupport />
+    </ProtectedRoute>
+  }
+/>
+
+        <Route path="/reports" element={
+          <ProtectedRoute><Reports /></ProtectedRoute>
+        } />
+
+        <Route
+ path="/settings"
+ element={
+  <ProtectedRoute>
+    <Settings/>
+  </ProtectedRoute>
+ }
+/>
+      </Routes>
+
+    </>
+  );
+}
+
+export default App;
+==========================================
+BACKEND ROUTE FILES
+==========================================
+
+FILE: backend/routes/polls.js
+const express = require("express");
+const router = express.Router();
+const Poll = require("../models/Poll");
+const auth = require("../middleware/authMiddleware");
+
+// ================= CREATE POLL =================
+router.post("/", auth, async (req, res) => {
+  try {
+    const { question, description, options, location, closesAt } = req.body;
+
+    const poll = new Poll({
+      question,
+      description,
+      options: options.map((opt) => ({ text: opt })),
+      location,
+      closesAt,
+      createdBy: req.user.id,
+      status: "open",
+      voters: [],
+    });
+
+    await poll.save();
+
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+
+    res.json({ message: "Poll created successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error creating poll" });
+  }
+});
+
+// ================= GET ALL POLLS =================
+router.get("/", auth, async (req, res) => {
+  try {
+    let polls = await Poll.find().sort({ createdAt: -1 });
+
+    const now = new Date();
+
+    // Auto close expired polls
+    polls = await Promise.all(
+      polls.map(async (poll) => {
+        if (poll.closesAt && now > poll.closesAt && poll.status === "open") {
+          poll.status = "closed";
+          await poll.save();
+        }
+        return poll;
+      }),
+    );
+
+    res.json(polls);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error fetching polls" });
+  }
+});
+
+// ================= VOTE =================
+router.put("/vote/:id", auth, async (req, res) => {
+  try {
+    const { optionIndex } = req.body;
+    const poll = await Poll.findById(req.params.id);
+
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+
+    if (poll.status === "closed")
+      return res.status(400).json({ message: "Poll closed" });
+
+    if (poll.voters.includes(req.user.id))
+      return res.status(400).json({ message: "Already voted" });
+
+    if (!poll.options[optionIndex])
+      return res.status(400).json({ message: "Invalid option" });
+
+    poll.options[optionIndex].votes += 1;
+    poll.voters.push(req.user.id);
+
+    await poll.save();
+
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+
+    res.json({ message: "Vote submitted successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Voting failed" });
+  }
+});
+
+// ================= UPDATE POLL =================
+router.put("/update/:id", auth, async (req, res) => {
+  try {
+    const { question, description, location, closesAt, options } = req.body;
+
+    const poll = await Poll.findById(req.params.id);
+
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+
+    if (poll.createdBy.toString() !== req.user.id)
+      return res.status(403).json({ message: "Not authorized" });
+
+    if (poll.status === "closed")
+      return res.status(400).json({ message: "Cannot edit closed poll" });
+
+    // Update basic fields
+    poll.question = question;
+    poll.description = description;
+    poll.location = location;
+    poll.closesAt = closesAt;
+
+    // 🔥 Update options (reset votes)
+    if (options && options.length >= 2) {
+      poll.options = options.map((opt) => ({
+        text: opt,
+        votes: 0,
+      }));
+      poll.voters = []; // reset voters when editing options
+    }
+
+    await poll.save();
+
+    res.json(poll); // return updated poll
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error updating poll" });
+  }
+});
+
+// ================= DELETE POLL =================
+router.delete("/delete/:id", auth, async (req, res) => {
+  try {
+    const poll = await Poll.findById(req.params.id);
+
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+
+    if (poll.createdBy.toString() !== req.user.id)
+      return res.status(403).json({ message: "Not authorized" });
+
+    await poll.deleteOne();
+
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+
+    res.json({ message: "Poll deleted successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error deleting poll" });
+  }
+});
+
+// ================= CLOSE POLL MANUALLY =================
+router.put("/close/:id", auth, async (req, res) => {
+  try {
+    const poll = await Poll.findById(req.params.id);
+
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+
+    if (poll.createdBy.toString() !== req.user.id)
+      return res.status(403).json({ message: "Not authorized" });
+
+    poll.status = "closed";
+    await poll.save();
+
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+
+    res.json({ message: "Poll closed successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error closing poll" });
+  }
+});
+
+module.exports = router;
+
+FILE: backend/routes/reports.js
+const router = require("express").Router();
+const Petition = require("../models/Petition");
+const Poll = require("../models/Poll");
+const { Parser } = require("json2csv");
+const PDFDocument = require("pdfkit");
+
+/* ================= GET REPORT DATA ================= */
+
+router.get("/", async (req, res) => {
+  try {
+
+    const totalPetitions = await Petition.countDocuments();
+    const active = await Petition.countDocuments({ status: "active" });
+    const under_review = await Petition.countDocuments({ status: "under_review" });
+    const closed = await Petition.countDocuments({ status: "closed" });
+
+    const totalPolls = await Poll.countDocuments();
+    const openPolls = await Poll.countDocuments({ status: "open" });
+    const closedPolls = await Poll.countDocuments({ status: "closed" });
+
+    const signatures = await Petition.aggregate([
+      { $project: { count: { $size: { $ifNull: ["$signatures", []] } } } },
+      { $group: { _id: null, total: { $sum: "$count" } } }
+    ]);
+
+    // Monthly petition trend — last 6 months
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 5);
+    sixMonthsAgo.setDate(1);
+    sixMonthsAgo.setHours(0, 0, 0, 0);
+
+    const monthlyTrend = await Petition.aggregate([
+      { $match: { createdAt: { $gte: sixMonthsAgo } } },
+      { $addFields: { sigCount: { $size: { $ifNull: ["$signatures", []] } } } },
+      {
+        $group: {
+          _id: { year: { $year: "$createdAt" }, month: { $month: "$createdAt" } },
+          count: { $sum: 1 },
+          signatures: { $sum: "$sigCount" }
+        }
+      },
+      { $sort: { "_id.year": 1, "_id.month": 1 } }
+    ]);
+
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    
+    // Fill in missing months for the last 6 months
+    const trendData = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date();
+      d.setMonth(d.getMonth() - i);
+      const year = d.getFullYear();
+      const month = d.getMonth() + 1; // 1-indexed for matching aggregation
+      
+      const found = monthlyTrend.find(m => m._id.year === year && m._id.month === month);
+      trendData.push({
+        month: monthNames[month - 1],
+        petitions: found ? found.count : 0,
+        signatures: found ? found.signatures : 0
+      });
+    }
+
+    // Top category
+    const topCategoryAgg = await Petition.aggregate([
+      { $group: { _id: "$category", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 1 }
+    ]);
+    const topCategory = topCategoryAgg[0]?._id || "N/A";
+
+    // Category breakdown for bar chart
+    const categoryBreakdown = await Petition.aggregate([
+      { $group: { _id: "$category", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 6 }
+    ]);
+
+    res.json({
+      totalPetitions,
+      active,
+      under_review,
+      closed,
+      totalSignatures: signatures[0]?.total || 0,
+      totalPolls,
+      openPolls,
+      closedPolls,
+      trendData,
+      topCategory,
+      categoryBreakdown: categoryBreakdown.map(c => ({ name: c._id || "Other", count: c.count }))
+    });
+
+  } catch (error) {
+    console.error("Reports error:", error.message);
+    res.status(500).json({ message: "Error generating report", detail: error.message });
+  }
+});
+
+
+/* ================= EXPORT CSV ================= */
+
+router.get("/export/csv", async (req, res) => {
+
+  const data = await Petition.find().populate("createdBy", "name email");
+
+  const fields = [
+    "title",
+    "category",
+    "location",
+    "status",
+    "goal"
+  ];
+
+  const parser = new Parser({ fields });
+
+  const csv = parser.parse(data);
+
+  res.header("Content-Type", "text/csv");
+  res.attachment("civic-report.csv");
+  res.send(csv);
+});
+
+
+/* ================= EXPORT PDF ================= */
+
+router.get("/export/pdf", async (req, res) => {
+
+  const totalPetitions = await Petition.countDocuments();
+  const active = await Petition.countDocuments({ status: "active" });
+  const under_review = await Petition.countDocuments({ status: "under_review" });
+  const closed = await Petition.countDocuments({ status: "closed" });
+  const polls = await Poll.countDocuments();
+
+  const doc = new PDFDocument();
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", "attachment; filename=report.pdf");
+
+  doc.pipe(res);
+
+  doc.fontSize(22).text("Civic Engagement Report", { align: "center" });
+  doc.moveDown();
+
+  doc.fontSize(14).text(`Total Petitions: ${totalPetitions}`);
+  doc.text(`Active Petitions: ${active}`);
+  doc.text(`Under Review: ${under_review}`);
+  doc.text(`Closed Petitions: ${closed}`);
+  doc.text(`Total Polls: ${polls}`);
+
+  doc.end();
+});
+
+module.exports = router;
+FILE: backend/routes/petitionRoutes.js
+const express = require("express");
+const router = express.Router();
+
+const Petition = require("../models/Petition");
+const User = require("../models/User");
+const auth = require("../middleware/authMiddleware");
+const sendEmail = require("../utils/sendEmail");
+const Notification = require("../models/Notification");
+
+// Emit a live update to connected clients
+const emitPetitionUpdate = (req, petition) => {
+  const io = req.app.get("io");
+
+  if (io) {
+    io.emit("petition:updated", {
+      petitionId: petition._id,
+      signatures: petition.signatures?.length || 0,
+      status: petition.status,
+    });
+  }
+};
+
+// Create a notification and send it to the recipient
+const createAndEmitNotification = async (req, userId, message) => {
+  const notification = await Notification.create({
+    userId,
+    message,
+  });
+
+  const io = req.app.get("io");
+
+  if (io) {
+    io.to(`user:${userId.toString()}`).emit("notification:new", notification);
+  }
+
+  return notification;
+};
+
+/* ================= CREATE ================= */
+
+router.post("/", auth, async (req, res) => {
+  try {
+    const { title, description, category, location, goal } = req.body;
+
+    const petition = new Petition({
+      title,
+      description,
+      category,
+      location,
+      goal: goal || 100,
+      createdBy: req.user.id,
+    });
+
+    await petition.save();
+
+    emitPetitionUpdate(req, petition);
+
+    res.status(201).json(petition);
+  } catch (error) {
+    console.error("Create petition error:", error);
+    res.status(500).json({ message: "Error creating petition" });
+  }
+});
+
+/* ================= GET ALL ================= */
+
+router.get("/", auth, async (req, res) => {
+  try {
+    const { page = 1, limit = 5, category, location } = req.query;
+
+    const query = {};
+    const user = await User.findById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (user.role === "official" && user.location) {
+      query.location = { $regex: user.location, $options: "i" };
+    }
+
+    if (category) {
+      query.category = { $regex: category, $options: "i" };
+    }
+
+    if (location) {
+      query.location = { $regex: location, $options: "i" };
+    }
+
+    const total = await Petition.countDocuments(query);
+
+    const petitions = await Petition.find(query)
+      .populate("createdBy", "name email location role")
+      .populate("responses.officialId", "name")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(Number(limit));
+
+    res.json({
+      petitions,
+      totalPages: Math.ceil(total / limit),
+    });
+  } catch (error) {
+    console.error("Fetch petitions error:", error);
+    res.status(500).json({ message: "Error fetching petitions" });
+  }
+});
+
+/* ================= GET ONE ================= */
+
+router.get("/:id", auth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id)
+      .populate("createdBy", "name email location role")
+      .populate("responses.officialId", "name");
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    res.json(petition);
+  } catch (error) {
+    console.error("Fetch petition error:", error);
+    res.status(500).json({ message: "Error fetching petition" });
+  }
+});
+
+/* ================= SIGN ================= */
+
+router.put("/sign/:id", auth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id);
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    if (petition.status !== "active") {
+      return res.status(400).json({
+        message: "Petition must be approved by an admin before it can be signed.",
+      });
+    }
+
+    const alreadySigned = petition.signatures.some(
+      (id) => id.toString() === req.user.id
+    );
+
+    if (alreadySigned) {
+      return res.status(400).json({
+        message: "You have already signed this petition.",
+      });
+    }
+
+    petition.signatures.push(req.user.id);
+
+    if (petition.signatures.length >= petition.goal) {
+      petition.status = "under_review";
+    }
+
+    await petition.save();
+
+    await createAndEmitNotification(
+      req,
+      petition.createdBy,
+      "Someone signed your petition: " + petition.title
+    );
+
+    emitPetitionUpdate(req, petition);
+
+    res.json({
+      message: "Signed successfully",
+      petition,
+    });
+  } catch (error) {
+    console.error("Sign petition error:", error);
+    res.status(500).json({ message: "Error signing petition" });
+  }
+});
+
+/* ================= OFFICIAL RESPONSE ================= */
+
+router.post("/respond/:id", auth, async (req, res) => {
+  try {
+    const { comment } = req.body;
+
+    const user = await User.findById(req.user.id);
+
+    if (!user || user.role !== "official") {
+      return res.status(403).json({
+        message: "Only officials can respond",
+      });
+    }
+
+    const petition = await Petition.findById(req.params.id)
+      .populate("createdBy");
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    petition.responses.push({
+      officialId: req.user.id,
+      comment,
+    });
+
+    await petition.save();
+
+    const creatorId = petition.createdBy._id;
+
+    await createAndEmitNotification(
+      req,
+      creatorId,
+      "Official responded to your petition: " + petition.title
+    );
+
+    emitPetitionUpdate(req, petition);
+
+    const petitionOwner = await User.findById(creatorId);
+
+    if (petitionOwner?.notifications) {
+      await sendEmail(
+        petitionOwner.email,
+        "Official Response to Your Petition",
+        `Hello ${petitionOwner.name},
+
+An official responded to your petition "${petition.title}".
+
+Response:
+${comment}
+
+Thank you.`
+      );
+    }
+
+    res.json({ message: "Response added" });
+  } catch (error) {
+    console.error("Respond to petition error:", error);
+    res.status(500).json({ message: "Error responding" });
+  }
+});
+
+/* ================= CLOSE ================= */
+
+router.put("/close/:id", auth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id);
+    const user = await User.findById(req.user.id);
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    if (!user || (user.role !== "official" && user.role !== "admin")) {
+      return res.status(403).json({
+        message: "Not authorized to close petitions",
+      });
+    }
+
+    petition.status = "closed";
+    await petition.save();
+
+    const creatorId = petition.createdBy?._id || petition.createdBy;
+
+    await createAndEmitNotification(
+      req,
+      creatorId,
+      "Your petition has been closed: " + petition.title
+    );
+
+    emitPetitionUpdate(req, petition);
+
+    const owner = await User.findById(creatorId);
+
+    if (owner?.notifications) {
+      await sendEmail(
+        owner.email,
+        "Petition Closed",
+        `Hello,
+
+Your petition "${petition.title}" has been closed.
+
+Thank you.`
+      );
+    }
+
+    res.json({
+      message: "Petition closed successfully",
+      petition,
+    });
+  } catch (error) {
+    console.error("Close petition error:", error);
+    res.status(500).json({ message: "Error closing petition" });
+  }
+});
+
+/* ================= APPROVE ================= */
+
+router.put("/approve/:id", auth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id);
+    const user = await User.findById(req.user.id);
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    if (!user || (user.role !== "official" && user.role !== "admin")) {
+      return res.status(403).json({ message: "Not authorized" });
+    }
+
+    petition.status = "active";
+    await petition.save();
+
+    const creatorId = petition.createdBy?._id || petition.createdBy;
+
+    await createAndEmitNotification(
+      req,
+      creatorId,
+      "Your petition has been approved: " + petition.title
+    );
+
+    emitPetitionUpdate(req, petition);
+
+    res.json({
+      message: "Petition approved successfully",
+      petition,
+    });
+  } catch (error) {
+    console.error("Approve petition error:", error);
+    res.status(500).json({ message: "Error approving petition" });
+  }
+});
+
+/* ================= UPDATE ================= */
+
+router.put("/:id", auth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id);
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    if (petition.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: "Not authorized" });
+    }
+
+    if (petition.status !== "active") {
+      return res.status(400).json({
+        message: "Only active petitions can be edited",
+      });
+    }
+
+    const { title, description, category, location, goal } = req.body;
+
+    petition.title = title;
+    petition.description = description;
+    petition.category = category;
+    petition.location = location;
+    petition.goal = goal;
+
+    await petition.save();
+
+    emitPetitionUpdate(req, petition);
+
+    res.json({
+      message: "Petition updated successfully",
+      petition,
+    });
+  } catch (error) {
+    console.error("Update petition error:", error);
+    res.status(500).json({ message: "Error updating petition" });
+  }
+});
+
+/* ================= DELETE ================= */
+
+router.delete("/:id", auth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id);
+    const user = await User.findById(req.user.id);
+
+    if (!petition) {
+      return res.status(404).json({ message: "Petition not found" });
+    }
+
+    const isOfficial = user?.role === "official";
+    const isCreator = petition.createdBy.toString() === req.user.id;
+
+    if (!isOfficial && !isCreator) {
+      return res.status(403).json({ message: "Not authorized" });
+    }
+
+    const petitionId = petition._id;
+
+    await petition.deleteOne();
+
+    const io = req.app.get("io");
+
+    if (io) {
+      io.emit("petition:deleted", { petitionId });
+    }
+
+    res.json({
+      message: isOfficial ? "Deleted by official" : "Deleted by creator",
+    });
+  } catch (error) {
+    console.error("Delete petition error:", error);
+    res.status(500).json({ message: "Error deleting petition" });
+  }
+});
+
+module.exports = router;
+
+FILE: backend/routes/settingsRoutes.js
+const express = require("express");
+const router = express.Router();
+
+const auth = require("../middleware/authMiddleware");
+const upload = require("../middleware/upload");
+
+const {
+
+  getProfile,
+  updateProfile,
+  changePassword,
+  toggleNotifications,
+  uploadPhoto,
+  removePhoto,
+  deleteAccount
+
+} = require("../controllers/settingsController");
+
+
+router.get("/profile", auth, getProfile);
+
+router.put("/profile", auth, updateProfile);
+
+router.put("/password", auth, changePassword);
+
+router.put("/notifications", auth, toggleNotifications);
+
+router.post("/photo", auth, upload.single("photo"), uploadPhoto);
+
+router.delete("/photo", auth, removePhoto);
+
+router.delete("/delete", auth, deleteAccount);
+
+
+module.exports = router;
+FILE: backend/routes/notificationRoutes.js
+const express = require("express");
+const router = express.Router();
+const Notification = require("../models/Notification");
+const auth = require("../middleware/authMiddleware");
+
+/* ================= GET NOTIFICATIONS ================= */
+
+router.get("/", auth, async (req, res) => {
+  try {
+
+    const notifications = await Notification
+      .find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .limit(20);
+
+    res.json(notifications);
+
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching notifications" });
+  }
+});
+
+
+/* ================= MARK ALL AS READ ================= */
+
+router.put("/read", auth, async (req, res) => {
+  try {
+
+    await Notification.updateMany(
+      { userId: req.user.id, read: false },
+      { $set: { read: true } }
+    );
+
+    res.json({ message: "Notifications marked as read" });
+
+  } catch (error) {
+    res.status(500).json({ message: "Error updating notifications" });
+  }
+});
+
+
+/* ================= DELETE ALL (OPTIONAL) ================= */
+
+router.delete("/clear", auth, async (req, res) => {
+  try {
+
+    await Notification.deleteMany({ userId: req.user.id });
+
+    res.json({ message: "All notifications cleared" });
+
+  } catch (error) {
+    res.status(500).json({ message: "Error clearing notifications" });
+  }
+});
+
+
+module.exports = router;
+FILE: backend/routes/officialRoutes.js
+const express = require("express");
+const router = express.Router();
+const User = require("../models/User");
+const auth = require("../middleware/authMiddleware");
+
+router.get("/", auth, async (req, res) => {
+  try {
+    const officials = await User.find({ role: "official" })
+      .select("name email location createdAt");
+
+    res.json(officials);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching officials" });
+  }
+});
+
+module.exports = router;
+FILE: backend/routes/adminRoutes.js
+const express = require("express");
+const router = express.Router();
+const User = require("../models/User");
+const Petition = require("../models/Petition");
+const Poll = require("../models/Poll");
+const Notification = require("../models/Notification");
+const adminAuth = require("../middleware/adminMiddleware");
+const sendEmail = require("../utils/sendEmail");
+
+/* ─── STATS ─────────────────────────────────────────── */
+router.get("/stats", adminAuth, async (req, res) => {
+  try {
+    const [
+      totalUsers,
+      totalPetitions,
+      totalPolls,
+      pendingPetitions,
+      bannedUsers,
+    ] = await Promise.all([
+      User.countDocuments(),
+      Petition.countDocuments(),
+      Poll.countDocuments(),
+      Petition.countDocuments({ status: "pending" }),
+      User.countDocuments({ isBanned: true }),
+    ]);
+
+    const sigAgg = await Petition.aggregate([
+      { $project: { count: { $size: "$signatures" } } },
+      { $group: { _id: null, total: { $sum: "$count" } } },
+    ]);
+
+    const roleBreakdown = await User.aggregate([
+      { $group: { _id: "$role", count: { $sum: 1 } } },
+    ]);
+
+    res.json({
+      totalUsers,
+      totalPetitions,
+      totalPolls,
+      pendingPetitions,
+      bannedUsers,
+      totalSignatures: sigAgg[0]?.total || 0,
+      roleBreakdown,
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching stats" });
+  }
+});
+
+/* ─── USERS ─────────────────────────────────────────── */
+router.get("/users", adminAuth, async (req, res) => {
+  try {
+    const { search = "", role = "" } = req.query;
+    const query = {};
+    if (search) query.name = { $regex: search, $options: "i" };
+    if (role) query.role = role;
+    const users = await User.find(query)
+      .select("-password")
+      .sort({ createdAt: -1 });
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching users" });
+  }
+});
+
+router.put("/users/:id/role", adminAuth, async (req, res) => {
+  try {
+    const { role } = req.body;
+    if (!["citizen", "official", "admin"].includes(role))
+      return res.status(400).json({ message: "Invalid role" });
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { role },
+      { new: true },
+    ).select("-password");
+
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ message: "Error updating role" });
+  }
+});
+
+router.put("/users/:id/ban", adminAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+    if (user.role === "admin")
+      return res.status(400).json({ message: "Cannot ban admins" });
+
+    user.isBanned = !user.isBanned;
+    await user.save();
+    res.json({
+      message: user.isBanned ? "User banned" : "User unbanned",
+      user,
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Error toggling ban" });
+  }
+});
+
+router.put("/users/:id/verify", adminAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+    if (user.role !== "official")
+      return res
+        .status(400)
+        .json({ message: "Only officials can be verified" });
+
+    user.isVerified = !user.isVerified;
+    await user.save();
+    res.json({
+      message: user.isVerified ? "Official verified" : "Verification removed",
+      user,
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Error toggling verification" });
+  }
+});
+
+router.delete("/users/:id", adminAuth, async (req, res) => {
+  try {
+    if (req.params.id === req.user.id)
+      return res
+        .status(400)
+        .json({ message: "Cannot delete your own account" });
+
+    await User.findByIdAndDelete(req.params.id);
+    res.json({ message: "User deleted" });
+  } catch (err) {
+    res.status(500).json({ message: "Error deleting user" });
+  }
+});
+
+/* ─── PETITIONS ─────────────────────────────────────── */
+router.get("/petitions", adminAuth, async (req, res) => {
+  try {
+    const { status = "" } = req.query;
+    const query = status ? { status } : {};
+    const petitions = await Petition.find(query)
+      .populate("createdBy", "name email location")
+      .sort({ createdAt: -1 });
+    res.json(petitions);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching petitions" });
+  }
+});
+
+// Approve petition (under_review → active or closed)
+router.put("/petitions/:id/approve", adminAuth, async (req, res) => {
+  try {
+    const petition = await Petition.findById(req.params.id).populate(
+      "createdBy",
+    );
+    if (!petition)
+      return res.status(404).json({ message: "Petition not found" });
+
+    petition.status = "active";
+    await petition.save();
+
+    await Notification.create({
+      userId: petition.createdBy._id,
+      message: `Your petition "${petition.title}" has been approved by admin.`,
+    });
+
+    if (petition.createdBy.notifications) {
+      await sendEmail(
+        petition.createdBy.email,
+        "Petition Approved",
+        `Hello ${petition.createdBy.name},\n\nYour petition "${petition.title}" has been approved.\n\nThank you.`,
+      ).catch(() => {});
+    }
+
+    res.json({ message: "Petition approved", petition });
+  } catch (err) {
+    res.status(500).json({ message: "Error approving petition" });
+  }
+});
+
+// Reject petition → rejected
+router.put("/petitions/:id/reject", adminAuth, async (req, res) => {
+  try {
+    const { reason } = req.body;
+    const petition = await Petition.findById(req.params.id).populate(
+      "createdBy",
+    );
+    if (!petition)
+      return res.status(404).json({ message: "Petition not found" });
+
+    petition.status = "rejected";
+    await petition.save();
+
+    await Notification.create({
+      userId: petition.createdBy._id,
+      message: `Your petition "${petition.title}" was rejected. Reason: ${reason || "N/A"}`,
+    });
+
+    if (petition.createdBy.notifications) {
+      await sendEmail(
+        petition.createdBy.email,
+        "Petition Rejected",
+        `Hello ${petition.createdBy.name},\n\nYour petition "${petition.title}" has been rejected.\nReason: ${reason || "N/A"}\n\nThank you.`,
+      ).catch(() => {});
+    }
+
+    res.json({ message: "Petition rejected", petition });
+  } catch (err) {
+    res.status(500).json({ message: "Error rejecting petition" });
+  }
+});
+
+router.put("/petitions/:id/status", adminAuth, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const validStatuses = [
+      "pending",
+      "active",
+      "under_review",
+      "closed",
+      "rejected",
+    ];
+    if (!validStatuses.includes(status))
+      return res.status(400).json({ message: "Invalid status" });
+
+    const petition = await Petition.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true },
+    ).populate("createdBy", "name email");
+
+    if (!petition)
+      return res.status(404).json({ message: "Petition not found" });
+
+    await Notification.create({
+      userId: petition.createdBy._id,
+      message: `Your petition status changed to: ${status.replace("_", " ")}`,
+    });
+
+    res.json({ message: "Status updated", petition });
+  } catch (err) {
+    res.status(500).json({ message: "Error updating status" });
+  }
+});
+
+router.delete("/petitions/:id", adminAuth, async (req, res) => {
+  try {
+    const petition = await Petition.findByIdAndDelete(req.params.id);
+    if (!petition)
+      return res.status(404).json({ message: "Petition not found" });
+    res.json({ message: "Petition deleted" });
+  } catch (err) {
+    res.status(500).json({ message: "Error deleting petition" });
+  }
+});
+
+router.put("/petitions/:id/edit", adminAuth, async (req, res) => {
+  try {
+    const { title, description, category, location } = req.body;
+    const petition = await Petition.findByIdAndUpdate(
+      req.params.id,
+      { title, description, category, location },
+      { new: true },
+    );
+    if (!petition)
+      return res.status(404).json({ message: "Petition not found" });
+    res.json({ message: "Petition updated", petition });
+  } catch (err) {
+    res.status(500).json({ message: "Error updating petition" });
+  }
+});
+
+/* ─── POLLS ─────────────────────────────────────────── */
+router.get("/polls", adminAuth, async (req, res) => {
+  try {
+    const polls = await Poll.find()
+      .populate("createdBy", "name email")
+      .sort({ createdAt: -1 });
+    res.json(polls);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching polls" });
+  }
+});
+
+router.put("/polls/:id/close", adminAuth, async (req, res) => {
+  try {
+    const poll = await Poll.findByIdAndUpdate(
+      req.params.id,
+      { status: "closed" },
+      { new: true },
+    );
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+    res.json({ message: "Poll closed", poll });
+  } catch (err) {
+    res.status(500).json({ message: "Error closing poll" });
+  }
+});
+
+router.put("/polls/:id/open", adminAuth, async (req, res) => {
+  try {
+    const poll = await Poll.findByIdAndUpdate(
+      req.params.id,
+      { status: "open" },
+      { new: true },
+    );
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+    res.json({ message: "Poll reopened", poll });
+  } catch (err) {
+    res.status(500).json({ message: "Error reopening poll" });
+  }
+});
+
+router.delete("/polls/:id", adminAuth, async (req, res) => {
+  try {
+    const poll = await Poll.findByIdAndDelete(req.params.id);
+    if (!poll) return res.status(404).json({ message: "Poll not found" });
+    const io = req.app.get("io");
+    if (io) io.emit("pollUpdated");
+    res.json({ message: "Poll deleted" });
+  } catch (err) {
+    res.status(500).json({ message: "Error deleting poll" });
+  }
+});
+
+module.exports = router;
+
+FILE: backend/routes/dashboard.js
+const express = require("express");
+const router = express.Router();
+const auth = require("../middleware/authMiddleware");
+const User = require("../models/User");
+const Petition = require("../models/Petition");
+const Poll = require("../models/Poll");
+
+router.get("/", auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // ✅ TOTAL petitions in system
+    const totalPetitions = await Petition.countDocuments();
+
+    // ✅ TOTAL closed petitions in system
+    const successful = await Petition.countDocuments({
+      status: "closed"
+    });
+
+    // ✅ TOTAL polls in system
+    const totalPolls = await Poll.countDocuments();
+
+    res.json({
+      name: user.name,
+      role: user.role,
+      location: user.location,
+      email: user.email,
+      totalPetitions,
+      successful,
+      totalPolls,
+      reports: 0
+    });
+
+  } catch (error) {
+    console.log("Dashboard Error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+module.exports = router;
+FILE: backend/routes/authRoutes.js
+const express = require("express");
+const router = express.Router();
+
+const {
+  register,
+  login,
+  forgotPassword,
+  resetPassword,
+} = require("../controllers/authController");
+
+router.post("/register", register);
+router.post("/login", login);
+
+
+router.post("/forgot-password", forgotPassword);
+router.post("/reset-password", resetPassword);
+
+module.exports = router;
+==========================================
+BACKEND MIDDLEWARE AND SOCKET REFERENCES
+==========================================
+backend/routes/petitionRoutes.js:11:const emitPetitionUpdate = (req, petition) => {
+backend/routes/petitionRoutes.js:15:    io.emit("petition:updated", {
+backend/routes/petitionRoutes.js:24:const createAndEmitNotification = async (req, userId, message) => {
+backend/routes/petitionRoutes.js:33:    io.to(`user:${userId.toString()}`).emit("notification:new", notification);
+backend/routes/petitionRoutes.js:56:    emitPetitionUpdate(req, petition);
+backend/routes/petitionRoutes.js:162:    await createAndEmitNotification(
+backend/routes/petitionRoutes.js:168:    emitPetitionUpdate(req, petition);
+backend/routes/petitionRoutes.js:210:    await createAndEmitNotification(
+backend/routes/petitionRoutes.js:216:    emitPetitionUpdate(req, petition);
+backend/routes/petitionRoutes.js:264:    await createAndEmitNotification(
+backend/routes/petitionRoutes.js:270:    emitPetitionUpdate(req, petition);
+backend/routes/petitionRoutes.js:316:    await createAndEmitNotification(
+backend/routes/petitionRoutes.js:322:    emitPetitionUpdate(req, petition);
+backend/routes/petitionRoutes.js:364:    emitPetitionUpdate(req, petition);
+backend/server.js:6:const { Server } = require("socket.io");
+backend/server.js:36:// Socket.IO with reconnection recovery
+backend/server.js:49:// Authenticate socket connections using the existing JWT
+backend/server.js:50:io.use((socket, next) => {
+backend/server.js:52:    const token = socket.handshake.auth?.token;
+backend/server.js:64:    socket.userId = decoded.id;
+backend/server.js:71:io.on("connection", (socket) => {
+backend/server.js:72:  socket.join(`user:${socket.userId}`);
+backend/server.js:74:  console.log("Authenticated socket connected:", socket.userId);
+backend/server.js:76:  socket.on("disconnect", (reason) => {
+backend/server.js:77:    console.log("Socket disconnected:", socket.userId, reason);

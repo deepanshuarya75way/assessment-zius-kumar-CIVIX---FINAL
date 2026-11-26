@@ -1,16 +1,45 @@
 const express = require("express");
 const router = express.Router();
+
 const Petition = require("../models/Petition");
 const User = require("../models/User");
 const auth = require("../middleware/authMiddleware");
 const sendEmail = require("../utils/sendEmail");
 const Notification = require("../models/Notification");
 
+// Emit a live update to connected clients
+const emitPetitionUpdate = (req, petition) => {
+  const io = req.app.get("io");
+
+  if (io) {
+    io.emit("petition:updated", {
+      petitionId: petition._id,
+      signatures: petition.signatures?.length || 0,
+      status: petition.status,
+    });
+  }
+};
+
+// Create a notification and send it to the recipient
+const createAndEmitNotification = async (req, userId, message) => {
+  const notification = await Notification.create({
+    userId,
+    message,
+  });
+
+  const io = req.app.get("io");
+
+  if (io) {
+    io.to(`user:${userId.toString()}`).emit("notification:new", notification);
+  }
+
+  return notification;
+};
+
 /* ================= CREATE ================= */
 
 router.post("/", auth, async (req, res) => {
   try {
-
     const { title, description, category, location, goal } = req.body;
 
     const petition = new Petition({
@@ -24,9 +53,11 @@ router.post("/", auth, async (req, res) => {
 
     await petition.save();
 
-    res.status(201).json(petition);
+    emitPetitionUpdate(req, petition);
 
+    res.status(201).json(petition);
   } catch (error) {
+    console.error("Create petition error:", error);
     res.status(500).json({ message: "Error creating petition" });
   }
 });
@@ -35,11 +66,14 @@ router.post("/", auth, async (req, res) => {
 
 router.get("/", auth, async (req, res) => {
   try {
-
     const { page = 1, limit = 5, category, location } = req.query;
 
     const query = {};
     const user = await User.findById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
 
     if (user.role === "official" && user.location) {
       query.location = { $regex: user.location, $options: "i" };
@@ -66,8 +100,8 @@ router.get("/", auth, async (req, res) => {
       petitions,
       totalPages: Math.ceil(total / limit),
     });
-
   } catch (error) {
+    console.error("Fetch petitions error:", error);
     res.status(500).json({ message: "Error fetching petitions" });
   }
 });
@@ -76,17 +110,17 @@ router.get("/", auth, async (req, res) => {
 
 router.get("/:id", auth, async (req, res) => {
   try {
-
     const petition = await Petition.findById(req.params.id)
       .populate("createdBy", "name email location role")
       .populate("responses.officialId", "name");
 
-    if (!petition)
+    if (!petition) {
       return res.status(404).json({ message: "Petition not found" });
+    }
 
     res.json(petition);
-
   } catch (error) {
+    console.error("Fetch petition error:", error);
     res.status(500).json({ message: "Error fetching petition" });
   }
 });
@@ -95,18 +129,27 @@ router.get("/:id", auth, async (req, res) => {
 
 router.put("/sign/:id", auth, async (req, res) => {
   try {
-
     const petition = await Petition.findById(req.params.id);
 
-    if (!petition)
+    if (!petition) {
       return res.status(404).json({ message: "Petition not found" });
+    }
 
-    if (petition.status !== "active")
-      return res.status(400).json({ message: "Petition must be approved by an admin before it can be signed." });
+    if (petition.status !== "active") {
+      return res.status(400).json({
+        message: "Petition must be approved by an admin before it can be signed.",
+      });
+    }
 
-    const alreadySigned = petition.signatures.some(id => id.toString() === req.user.id);
-    if (alreadySigned)
-      return res.status(400).json({ message: "You have already signed this petition." });
+    const alreadySigned = petition.signatures.some(
+      (id) => id.toString() === req.user.id
+    );
+
+    if (alreadySigned) {
+      return res.status(400).json({
+        message: "You have already signed this petition.",
+      });
+    }
 
     petition.signatures.push(req.user.id);
 
@@ -116,18 +159,20 @@ router.put("/sign/:id", auth, async (req, res) => {
 
     await petition.save();
 
-    // ✅ CREATE NOTIFICATION
-    await Notification.create({
-      userId: petition.createdBy,
-      message: "Someone signed your petition: " + petition.title
-    });
+    await createAndEmitNotification(
+      req,
+      petition.createdBy,
+      "Someone signed your petition: " + petition.title
+    );
+
+    emitPetitionUpdate(req, petition);
 
     res.json({
       message: "Signed successfully",
-      petition
+      petition,
     });
-
   } catch (error) {
+    console.error("Sign petition error:", error);
     res.status(500).json({ message: "Error signing petition" });
   }
 });
@@ -136,19 +181,22 @@ router.put("/sign/:id", auth, async (req, res) => {
 
 router.post("/respond/:id", auth, async (req, res) => {
   try {
-
     const { comment } = req.body;
 
     const user = await User.findById(req.user.id);
 
-    if (user.role !== "official")
-      return res.status(403).json({ message: "Only officials can respond" });
+    if (!user || user.role !== "official") {
+      return res.status(403).json({
+        message: "Only officials can respond",
+      });
+    }
 
     const petition = await Petition.findById(req.params.id)
       .populate("createdBy");
 
-    if (!petition)
+    if (!petition) {
       return res.status(404).json({ message: "Petition not found" });
+    }
 
     petition.responses.push({
       officialId: req.user.id,
@@ -157,16 +205,19 @@ router.post("/respond/:id", auth, async (req, res) => {
 
     await petition.save();
 
-    // ✅ CREATE NOTIFICATION
-    await Notification.create({
-      userId: petition.createdBy._id,
-      message: "Official responded to your petition: " + petition.title
-    });
+    const creatorId = petition.createdBy._id;
 
-    // ✅ EMAIL WITH TOGGLE CHECK
-    const petitionOwner = await User.findById(petition.createdBy._id);
+    await createAndEmitNotification(
+      req,
+      creatorId,
+      "Official responded to your petition: " + petition.title
+    );
 
-    if (petitionOwner.notifications) {
+    emitPetitionUpdate(req, petition);
+
+    const petitionOwner = await User.findById(creatorId);
+
+    if (petitionOwner?.notifications) {
       await sendEmail(
         petitionOwner.email,
         "Official Response to Your Petition",
@@ -182,8 +233,8 @@ Thank you.`
     }
 
     res.json({ message: "Response added" });
-
   } catch (error) {
+    console.error("Respond to petition error:", error);
     res.status(500).json({ message: "Error responding" });
   }
 });
@@ -195,66 +246,87 @@ router.put("/close/:id", auth, async (req, res) => {
     const petition = await Petition.findById(req.params.id);
     const user = await User.findById(req.user.id);
 
-    if (!petition)
+    if (!petition) {
       return res.status(404).json({ message: "Petition not found" });
+    }
 
-    if (user.role !== "official" && user.role !== "admin")
-      return res.status(403).json({ message: "Not authorized to close petitions" });
+    if (!user || (user.role !== "official" && user.role !== "admin")) {
+      return res.status(403).json({
+        message: "Not authorized to close petitions",
+      });
+    }
 
     petition.status = "closed";
     await petition.save();
 
     const creatorId = petition.createdBy?._id || petition.createdBy;
 
-    // fire-and-forget — don't let these block the response
-    Notification.create({
-      userId: creatorId,
-      message: "Your petition has been closed: " + petition.title
-    }).catch(() => { });
+    await createAndEmitNotification(
+      req,
+      creatorId,
+      "Your petition has been closed: " + petition.title
+    );
 
-    User.findById(creatorId).then(owner => {
-      if (owner?.notifications) {
-        sendEmail(owner.email, "Petition Closed",
-          `Hello,\n\nYour petition "${petition.title}" has been closed.\n\nThank you.`
-        );
-      }
-    }).catch(() => { });
+    emitPetitionUpdate(req, petition);
 
-    res.json({ message: "Petition closed successfully", petition });
+    const owner = await User.findById(creatorId);
 
+    if (owner?.notifications) {
+      await sendEmail(
+        owner.email,
+        "Petition Closed",
+        `Hello,
+
+Your petition "${petition.title}" has been closed.
+
+Thank you.`
+      );
+    }
+
+    res.json({
+      message: "Petition closed successfully",
+      petition,
+    });
   } catch (error) {
-    console.error("Close error:", error.message);
+    console.error("Close petition error:", error);
     res.status(500).json({ message: "Error closing petition" });
   }
 });
 
-/* ================= APPROVE (official) ================= */
+/* ================= APPROVE ================= */
 
 router.put("/approve/:id", auth, async (req, res) => {
   try {
     const petition = await Petition.findById(req.params.id);
     const user = await User.findById(req.user.id);
 
-    if (!petition)
+    if (!petition) {
       return res.status(404).json({ message: "Petition not found" });
+    }
 
-    if (user.role !== "official" && user.role !== "admin")
+    if (!user || (user.role !== "official" && user.role !== "admin")) {
       return res.status(403).json({ message: "Not authorized" });
+    }
 
     petition.status = "active";
     await petition.save();
 
     const creatorId = petition.createdBy?._id || petition.createdBy;
 
-    Notification.create({
-      userId: creatorId,
-      message: "Your petition has been approved: " + petition.title
-    }).catch(() => { });
+    await createAndEmitNotification(
+      req,
+      creatorId,
+      "Your petition has been approved: " + petition.title
+    );
 
-    res.json({ message: "Petition approved successfully", petition });
+    emitPetitionUpdate(req, petition);
 
+    res.json({
+      message: "Petition approved successfully",
+      petition,
+    });
   } catch (error) {
-    console.error("Approve error:", error.message);
+    console.error("Approve petition error:", error);
     res.status(500).json({ message: "Error approving petition" });
   }
 });
@@ -263,17 +335,21 @@ router.put("/approve/:id", auth, async (req, res) => {
 
 router.put("/:id", auth, async (req, res) => {
   try {
-
     const petition = await Petition.findById(req.params.id);
 
-    if (!petition)
+    if (!petition) {
       return res.status(404).json({ message: "Petition not found" });
+    }
 
-    if (petition.createdBy.toString() !== req.user.id)
+    if (petition.createdBy.toString() !== req.user.id) {
       return res.status(403).json({ message: "Not authorized" });
+    }
 
-    if (petition.status !== "active")
-      return res.status(400).json({ message: "Only active petitions can be edited" });
+    if (petition.status !== "active") {
+      return res.status(400).json({
+        message: "Only active petitions can be edited",
+      });
+    }
 
     const { title, description, category, location, goal } = req.body;
 
@@ -285,12 +361,14 @@ router.put("/:id", auth, async (req, res) => {
 
     await petition.save();
 
+    emitPetitionUpdate(req, petition);
+
     res.json({
       message: "Petition updated successfully",
-      petition
+      petition,
     });
-
   } catch (error) {
+    console.error("Update petition error:", error);
     res.status(500).json({ message: "Error updating petition" });
   }
 });
@@ -299,26 +377,35 @@ router.put("/:id", auth, async (req, res) => {
 
 router.delete("/:id", auth, async (req, res) => {
   try {
-
     const petition = await Petition.findById(req.params.id);
     const user = await User.findById(req.user.id);
 
-    if (!petition)
+    if (!petition) {
       return res.status(404).json({ message: "Petition not found" });
-
-    if (user.role === "official") {
-      await petition.deleteOne();
-      return res.json({ message: "Deleted by official" });
     }
 
-    if (petition.createdBy.toString() === req.user.id) {
-      await petition.deleteOne();
-      return res.json({ message: "Deleted by creator" });
+    const isOfficial = user?.role === "official";
+    const isCreator = petition.createdBy.toString() === req.user.id;
+
+    if (!isOfficial && !isCreator) {
+      return res.status(403).json({ message: "Not authorized" });
     }
 
-    return res.status(403).json({ message: "Not authorized" });
+    const petitionId = petition._id;
 
+    await petition.deleteOne();
+
+    const io = req.app.get("io");
+
+    if (io) {
+      io.emit("petition:deleted", { petitionId });
+    }
+
+    res.json({
+      message: isOfficial ? "Deleted by official" : "Deleted by creator",
+    });
   } catch (error) {
+    console.error("Delete petition error:", error);
     res.status(500).json({ message: "Error deleting petition" });
   }
 });

@@ -1,14 +1,24 @@
+
 const User = require("../models/User");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
+
 // REGISTER
 exports.register = async (req, res) => {
   try {
     const { name, email, password, role, location, governmentId } = req.body;
 
-    // 🔐 Strong Password Validation
-    const strongRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/;
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        message: "Name, email and password are required",
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const strongRegex =
+      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/;
 
     if (!strongRegex.test(password)) {
       return res.status(400).json({
@@ -17,16 +27,21 @@ exports.register = async (req, res) => {
       });
     }
 
-    let user = await User.findOne({ email });
-    if (user) {
-      return res.status(400).json({ message: "User already exists" });
+    const existingUser = await User.findOne({
+      email: normalizedEmail,
+    });
+
+    if (existingUser) {
+      return res.status(400).json({
+        message: "User already exists",
+      });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    user = new User({
-      name,
-      email,
+    const user = new User({
+      name: name.trim(),
+      email: normalizedEmail,
       password: hashedPassword,
       role: role || "citizen",
       location,
@@ -35,10 +50,14 @@ exports.register = async (req, res) => {
 
     await user.save();
 
-    res.status(201).json({ message: "Registered successfully" });
+    return res.status(201).json({
+      message: "Registered successfully",
+    });
   } catch (error) {
-    console.log(error);
-    res.status(500).json({ message: "Server error" });
+    console.error("Register Error:", error);
+    return res.status(500).json({
+      message: "Server error",
+    });
   }
 };
 
@@ -47,29 +66,54 @@ exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const user = await User.findOne({ email });
+    if (!email || !password) {
+      return res.status(400).json({
+        message: "Email and password are required",
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const user = await User.findOne({
+      email: normalizedEmail,
+    });
+
     if (!user) {
-      return res.status(400).json({ message: "Invalid credentials" });
+      return res.status(401).json({
+        message: "Invalid email or password",
+      });
     }
 
     if (user.isBanned) {
-      return res
-        .status(403)
-        .json({
-          message: "Your account has been suspended. Please contact support.",
-        });
+      return res.status(403).json({
+        message:
+          "Your account has been suspended. Please contact support.",
+      });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
+
     if (!isMatch) {
-      return res.status(400).json({ message: "Invalid credentials" });
+      return res.status(401).json({
+        message: "Invalid email or password",
+      });
     }
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "1d",
-    });
+    if (!process.env.JWT_SECRET) {
+      console.error("JWT_SECRET is missing");
+      return res.status(500).json({
+        message: "Authentication configuration error",
+      });
+    }
 
-    res.json({
+    const token = jwt.sign(
+      { id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" }
+    );
+
+    return res.status(200).json({
+      message: "Login successful",
       token,
       user: {
         id: user._id,
@@ -80,29 +124,50 @@ exports.login = async (req, res) => {
       },
     });
   } catch (error) {
-    console.log(error);
-    res.status(500).json({ message: "Server error" });
+    console.error("Login Error:", error);
+    return res.status(500).json({
+      message: "Server error",
+    });
   }
 };
-// FORGOT PASSWORD - SEND OTP
+
+// FORGOT PASSWORD
 exports.forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
 
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
+    if (!email) {
+      return res.status(400).json({
+        message: "Email is required",
+      });
     }
 
-    // Generate 6 digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const user = await User.findOne({
+      email: email.trim().toLowerCase(),
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    const otp = Math.floor(
+      100000 + Math.random() * 900000
+    ).toString();
 
     user.resetOTP = otp;
-    user.resetOTPExpire = Date.now() + 10 * 60 * 1000; // 10 minutes
+    user.resetOTPExpire = Date.now() + 10 * 60 * 1000;
 
     await user.save();
 
-    // Email configuration
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+      console.error("Email configuration is missing");
+      return res.status(500).json({
+        message: "Email service is not configured",
+      });
+    }
+
     const transporter = nodemailer.createTransport({
       service: "gmail",
       auth: {
@@ -114,85 +179,80 @@ exports.forgotPassword = async (req, res) => {
     await transporter.sendMail({
       from: `"Civix Support Team" <${process.env.EMAIL_USER}>`,
       to: user.email,
-      subject: "🔐 Password Reset Request - Civix",
+      subject: "Password Reset Request - Civix",
       html: `
-    <div style="font-family: Arial, sans-serif; padding: 20px;">
-      
-      <h2 style="color:#2c3e50;">Hello ${user.name},</h2>
-      
-      <p>We received a request to reset your password for your Civix account.</p>
-      
-      <h3>Your Registered Details:</h3>
-      <ul>
-        <li><strong>Name:</strong> ${user.name}</li>
-        <li><strong>Email:</strong> ${user.email}</li>
-        <li><strong>Role:</strong> ${user.role}</li>
-        <li><strong>Location:</strong> ${user.location}</li>
-      </ul>
-
-      <p>Please use the following One-Time Password (OTP) to reset your password:</p>
-
-      <h1 style="color:#e74c3c; letter-spacing: 5px;">${otp}</h1>
-
-      <p><strong>This OTP is valid for 10 minutes.</strong></p>
-
-      <hr/>
-
-      <p style="font-size: 14px; color: gray;">
-        If you did not request a password reset, please ignore this email.
-        Your account remains secure.
-      </p>
-
-      <p style="margin-top:20px;">
-        Regards,<br/>
-        <strong>Civix Security Team</strong>
-      </p>
-
-    </div>
-  `,
+        <h2>Civix Password Reset</h2>
+        <p>Your password reset OTP is:</p>
+        <h1>${otp}</h1>
+        <p>This OTP expires in 10 minutes.</p>
+      `,
     });
 
-    res.json({ message: "OTP sent to registered email" });
+    return res.status(200).json({
+      message: "OTP sent to registered email",
+    });
   } catch (error) {
-    console.log(error);
-    res.status(500).json({ message: "Server error" });
+    console.error("Forgot Password Error:", error);
+    return res.status(500).json({
+      message: "Server error",
+    });
   }
 };
+
 // RESET PASSWORD
 exports.resetPassword = async (req, res) => {
   try {
     const { email, otp, newPassword } = req.body;
 
-    const user = await User.findOne({ email });
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        message: "Email, OTP and new password are required",
+      });
+    }
+
+    const user = await User.findOne({
+      email: email.trim().toLowerCase(),
+    });
+
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      return res.status(404).json({
+        message: "User not found",
+      });
     }
 
-    if (user.resetOTP !== otp || user.resetOTPExpire < Date.now()) {
-      return res.status(400).json({ message: "Invalid or expired OTP" });
+    if (
+      user.resetOTP !== otp ||
+      !user.resetOTPExpire ||
+      user.resetOTPExpire.getTime() < Date.now()
+    ) {
+      return res.status(400).json({
+        message: "Invalid or expired OTP",
+      });
     }
 
-    // 🔐 Strong Password Validation for Reset
-    const strongRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/;
+    const strongRegex =
+      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/;
 
     if (!strongRegex.test(newPassword)) {
       return res.status(400).json({
         message:
-          "New password must be strong (8+ chars, uppercase, lowercase, number, special character).",
+          "New password must be strong (8+ characters, uppercase, lowercase, number and special character).",
       });
     }
 
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-    user.password = hashedPassword;
+    user.password = await bcrypt.hash(newPassword, 10);
     user.resetOTP = undefined;
     user.resetOTPExpire = undefined;
 
     await user.save();
 
-    res.json({ message: "Password reset successful" });
+    return res.status(200).json({
+      message: "Password reset successful",
+    });
   } catch (error) {
-    console.log(error);
-    res.status(500).json({ message: "Server error" });
+    console.error("Reset Password Error:", error);
+    return res.status(500).json({
+      message: "Server error",
+    });
   }
 };

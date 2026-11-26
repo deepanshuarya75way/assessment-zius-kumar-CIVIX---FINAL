@@ -1,38 +1,92 @@
+
 import { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import axios from "axios";
 import { motion } from "framer-motion";
-import { Mail, Lock, ArrowRight, CheckCircle2 } from "lucide-react";
+import {
+  Mail,
+  Lock,
+  ArrowRight,
+  CheckCircle2,
+  AlertCircle,
+} from "lucide-react";
 import API from "../services/api";
 
 export default function Login() {
   const navigate = useNavigate();
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
 
   useEffect(() => {
     const token = localStorage.getItem("token");
+
     if (token) {
-      navigate("/dashboard");
+      navigate("/dashboard", { replace: true });
     }
   }, [navigate]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
+
+    if (isLoading) return;
+
+    setErrorMessage("");
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    if (!normalizedEmail || !password) {
+      setErrorMessage("Please enter your email and password.");
+      return;
+    }
+
     setIsLoading(true);
 
     try {
-      const res = await axios.post(`${API}/api/auth/login`, {
-        email,
-        password,
-      });
+      const response = await axios.post(
+        `${API}/api/auth/login`,
+        {
+          email: normalizedEmail,
+          password,
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+          },
+          timeout: 15000,
+        }
+      );
 
-      localStorage.setItem("token", res.data.token);
-      localStorage.setItem("user", JSON.stringify(res.data.user));
-      navigate("/dashboard");
+      const { token, user } = response.data;
+
+      if (!token || !user) {
+        throw new Error("Invalid response received from server.");
+      }
+
+      localStorage.setItem("token", token);
+      localStorage.setItem("user", JSON.stringify(user));
+
+      navigate("/dashboard", { replace: true });
+
     } catch (error) {
-      alert(error.response?.data?.message || "Login failed");
+      console.error("Login error:", error);
+
+      if (error.response) {
+        setErrorMessage(
+          error.response.data?.message || "Unable to login. Please try again."
+        );
+      } else if (error.code === "ECONNABORTED") {
+        setErrorMessage("Request timed out. Please try again.");
+      } else if (error.request) {
+        setErrorMessage(
+          "Unable to connect to the server. Please check your connection."
+        );
+      } else {
+        setErrorMessage(error.message || "Something went wrong.");
+      }
+
     } finally {
       setIsLoading(false);
     }
@@ -41,6 +95,7 @@ export default function Login() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
       <div className="max-w-5xl w-full bg-white rounded-3xl shadow-2xl flex flex-col md:flex-row overflow-hidden border border-slate-100">
+
         {/* LEFT PANEL */}
         <motion.div
           initial={{ x: -20, opacity: 0 }}
@@ -61,6 +116,7 @@ export default function Login() {
               Empowering Civic{" "}
               <span className="text-primary-400">Engagement</span>
             </h1>
+
             <p className="text-secondary-100 text-lg mb-12 font-medium opacity-80 leading-relaxed">
               Join our platform to connect with local officials and make your
               voice heard in your community.
@@ -91,7 +147,6 @@ export default function Login() {
             </div>
           </div>
 
-          {/* Decorative circles */}
           <div className="absolute top-0 right-0 w-64 h-64 bg-primary-500/10 rounded-full -translate-y-1/2 translate-x-1/2 blur-3xl"></div>
           <div className="absolute bottom-0 left-0 w-64 h-64 bg-secondary-500/10 rounded-full translate-y-1/2 -translate-x-1/2 blur-3xl"></div>
         </motion.div>
@@ -112,9 +167,13 @@ export default function Login() {
           </div>
 
           <div className="flex p-1.5 bg-slate-100 rounded-2xl mb-10 border border-slate-200">
-            <button className="flex-1 py-3 text-xs font-black uppercase tracking-widest text-secondary-700 bg-white rounded-xl shadow-md transition-all">
+            <button
+              type="button"
+              className="flex-1 py-3 text-xs font-black uppercase tracking-widest text-secondary-700 bg-white rounded-xl shadow-md transition-all"
+            >
               Login
             </button>
+
             <Link
               to="/register"
               className="flex-1 py-3 text-xs font-black uppercase tracking-widest text-slate-500 hover:text-slate-700 text-center transition-colors"
@@ -128,14 +187,20 @@ export default function Login() {
               <label className="text-xs font-black text-slate-400 uppercase tracking-widest block px-1">
                 Email Address
               </label>
+
               <div className="relative group">
                 <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400 group-focus-within:text-secondary-500 transition-colors" />
+
                 <input
                   type="email"
                   placeholder="name@example.com"
                   className="input-field pl-12 py-4 bg-slate-50 border-transparent focus:bg-white focus:border-secondary-500"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    setErrorMessage("");
+                  }}
+                  autoComplete="email"
                   required
                 />
               </div>
@@ -146,33 +211,50 @@ export default function Login() {
                 <label className="text-xs font-black text-slate-400 uppercase tracking-widest">
                   Password
                 </label>
+
                 <Link
                   to="/forgot-password"
-                  size="sm"
                   className="text-[10px] text-secondary-600 hover:text-secondary-700 font-black uppercase tracking-widest"
                 >
                   Forgot?
                 </Link>
               </div>
+
               <div className="relative group">
                 <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400 group-focus-within:text-secondary-500 transition-colors" />
+
                 <input
                   type="password"
                   placeholder="••••••••"
                   className="input-field pl-12 py-4 bg-slate-50 border-transparent focus:bg-white focus:border-secondary-500"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    setErrorMessage("");
+                  }}
+                  autoComplete="current-password"
                   required
                 />
               </div>
             </div>
 
+            {/* ERROR MESSAGE */}
+            {errorMessage && (
+              <div
+                role="alert"
+                className="flex items-start gap-3 p-3 rounded-xl bg-red-50 border border-red-200 text-red-600 text-sm"
+              >
+                <AlertCircle className="w-5 h-5 shrink-0" />
+                <span>{errorMessage}</span>
+              </div>
+            )}
+
             <motion.button
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
+              whileHover={{ scale: isLoading ? 1 : 1.02 }}
+              whileTap={{ scale: isLoading ? 1 : 0.98 }}
               disabled={isLoading}
               type="submit"
-              className="btn-secondary w-full flex items-center justify-center gap-3 py-4 shadow-xl shadow-secondary-600/20"
+              className="btn-secondary w-full flex items-center justify-center gap-3 py-4 shadow-xl shadow-secondary-600/20 disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {isLoading ? (
                 <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />

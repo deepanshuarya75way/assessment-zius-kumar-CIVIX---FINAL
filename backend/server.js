@@ -2,35 +2,83 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const http = require("http");
+const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
 require("dotenv").config();
-// const User = require("./models/test");
-
-
 
 const app = express();
 const server = http.createServer(app);
 
-app.use(
-  cors({
-    origin: [
-      "http://localhost:5173",
-      "https://civix-frontend.onrender.com",
-      /\.onrender\.com$/,
-      /\.netlify\.app$/,
-    ],
-    credentials: true,
-  }),
-);
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://civix-frontend.onrender.com",
+  /\.onrender\.com$/,
+  /\.netlify\.app$/,
+];
+
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+}));
 
 app.use(express.json());
 
-// MongoDB Connection
+app.get("/", (req, res) => {
+  res.send("CIVIX Backend is Running 🚀");
+});
+
+// MongoDB connection
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB Connected"))
-  .catch((err) => console.log(err));
+  .catch((err) => console.error("MongoDB error:", err));
 
+// Socket.IO with reconnection recovery
+const io = new Server(server, {
+  cors: {
+    origin: allowedOrigins,
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true,
+  },
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000,
+    skipMiddlewares: false,
+  },
+});
+
+// Authenticate socket connections using the existing JWT
+io.use((socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token;
+
+    if (!token) {
+      return next(new Error("Authentication required"));
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (!decoded.id) {
+      return next(new Error("Invalid token payload"));
+    }
+
+    socket.userId = decoded.id;
+    next();
+  } catch (error) {
+    next(new Error("Invalid or expired token"));
+  }
+});
+
+io.on("connection", (socket) => {
+  socket.join(`user:${socket.userId}`);
+
+  console.log("Authenticated socket connected:", socket.userId);
+
+  socket.on("disconnect", (reason) => {
+    console.log("Socket disconnected:", socket.userId, reason);
+  });
+});
+
+app.set("io", io);
 
 // Routes
 app.use("/api/auth", require("./routes/authRoutes"));
@@ -44,30 +92,8 @@ app.use("/api/settings", require("./routes/settingsRoutes"));
 app.use("/api/notifications", require("./routes/notificationRoutes"));
 app.use("/api/admin", require("./routes/adminRoutes"));
 
-//  Socket.io Setup
-const io = new Server(server, {
-  cors: {
-    origin: [
-      "http://localhost:5173",
-      "https://civix-backend-e7m5.onrender.com",
-      /\.onrender\.com$/,
-      /\.netlify\.app$/,
-    ],
-    methods: ["GET", "POST", "PUT"],
-  },
+const PORT = process.env.PORT || 5000;
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
-
-app.set("io", io);
-
-io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
-});
-
-app.listen(process.env.PORT || 5000, () => {
-  console.log("Server running");
-});
-
-app.get("/", (req, res) => {
-  res.send("CIVIX Backend is Running 🚀");
-});
-

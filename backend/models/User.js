@@ -1,13 +1,31 @@
+
 const mongoose = require("mongoose");
 
 const userSchema = new mongoose.Schema(
   {
-    name: { type: String, required: true },
-    email: { type: String, required: true, unique: true },
-    password: { type: String, required: true },
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+    },
 
-    location: { type: String },
+    email: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      lowercase: true,
+    },
 
+    password: {
+      type: String,
+      required: true,
+    },
+
+    location: {
+      type: String,
+      trim: true,
+    },
 
     role: {
       type: String,
@@ -19,6 +37,7 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+
     resetOTP: {
       type: String,
     },
@@ -29,25 +48,27 @@ const userSchema = new mongoose.Schema(
 
     profilePhoto: {
       type: String,
-      default: ""
+      default: "",
     },
 
     notifications: {
       type: Boolean,
-      default: true
+      default: true,
     },
 
     isBanned: {
       type: Boolean,
-      default: false
+      default: false,
     },
 
     isVerified: {
       type: Boolean,
-      default: false
+      default: false,
     },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+  }
 );
 
 module.exports = mongoose.model("User", userSchema);

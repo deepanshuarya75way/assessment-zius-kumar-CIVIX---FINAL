@@ -64,9 +64,12 @@ export default function Dashboard() {
       setRecentPetitions(petRes.data.petitions || []);
     } catch (error) {
       console.error("Dashboard fetch error:", error);
-      localStorage.clear();
-      socket.disconnect();
-      navigate("/");
+
+      if (error.response?.status === 401) {
+        socket.disconnect();
+        localStorage.clear();
+        navigate("/");
+      }
     } finally {
       setIsLoading(false);
     }

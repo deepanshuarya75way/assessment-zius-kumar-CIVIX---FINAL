@@ -53,12 +53,49 @@ router.post("/", auth, async (req, res) => {
 
     await petition.save();
 
+    const io = req.app.get("io");
+
+    // Notify connected admin dashboards immediately.
+    if (io) {
+      io.to("admins").emit("petition:created", {
+        petition,
+      });
+    }
+
+    // Save persistent notifications for admins.
+    try {
+      const admins = await User.find({
+        role: "admin",
+      }).select("_id");
+
+      const notifications = await Notification.insertMany(
+        admins.map((admin) => ({
+          userId: admin._id,
+          message: `New petition created: ${petition.title}`,
+        }))
+      );
+
+      // Send notification to each admin's personal room.
+      if (io) {
+        notifications.forEach((notification) => {
+          io.to(`user:${notification.userId.toString()}`)
+            .emit("notification:new", notification);
+        });
+      }
+    } catch (notificationError) {
+      console.error("Admin notification error:", notificationError);
+    }
+
     emitPetitionUpdate(req, petition);
 
-    res.status(201).json(petition);
+    return res.status(201).json(petition);
+
   } catch (error) {
     console.error("Create petition error:", error);
-    res.status(500).json({ message: "Error creating petition" });
+
+    return res.status(500).json({
+      message: "Error creating petition",
+    });
   }
 });
 

@@ -62,6 +62,12 @@ export default function AdminDashboard() {
       fetchStats();
     };
 
+    const handlePetitionCreated = () => {
+      refreshStats();
+      if (tab === "petitions") fetchPetitions();
+    };
+
+    socket.on("petition:created", handlePetitionCreated);
     socket.on("petition:updated", refreshStats);
     socket.on("pollUpdated", refreshStats);
     socket.on("connect", refreshStats);
@@ -73,11 +79,12 @@ export default function AdminDashboard() {
     }
 
     return () => {
+      socket.off("petition:created", handlePetitionCreated);
       socket.off("petition:updated", refreshStats);
       socket.off("pollUpdated", refreshStats);
       socket.off("connect", refreshStats);
     };
-  }, []);
+  }, [tab]);
   useEffect(() => {
     if (tab === "users") fetchUsers();
   }, [tab, search, roleFilter]);

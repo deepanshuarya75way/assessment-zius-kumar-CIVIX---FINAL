@@ -5,6 +5,7 @@ const http = require("http");
 const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
 require("dotenv").config();
+const User = require("./models/User");
 
 const app = express();
 const server = http.createServer(app);
@@ -46,8 +47,8 @@ const io = new Server(server, {
   },
 });
 
-// Authenticate socket connections using the existing JWT
-io.use((socket, next) => {
+// Authenticate socket connections and join role-based rooms.
+io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
 
@@ -61,7 +62,15 @@ io.use((socket, next) => {
       return next(new Error("Invalid token payload"));
     }
 
-    socket.userId = decoded.id;
+    const user = await User.findById(decoded.id).select("role");
+
+    if (!user) {
+      return next(new Error("User not found"));
+    }
+
+    socket.userId = user._id.toString();
+    socket.userRole = user.role;
+
     next();
   } catch (error) {
     next(new Error("Invalid or expired token"));
@@ -71,7 +80,12 @@ io.use((socket, next) => {
 io.on("connection", (socket) => {
   socket.join(`user:${socket.userId}`);
 
-  console.log("Authenticated socket connected:", socket.userId);
+  if (socket.userRole === "admin") {
+    socket.join("admins");
+    console.log("Admin joined:", socket.userId);
+  }
+
+  console.log("Socket connected:", socket.userId);
 
   socket.on("disconnect", (reason) => {
     console.log("Socket disconnected:", socket.userId, reason);
